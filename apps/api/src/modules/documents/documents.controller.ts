@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Controller,
   Get,
+  Inject,
   Param,
   Post,
   UploadedFiles,
@@ -20,7 +21,7 @@ import { DocumentsService } from './documents.service';
 @Controller('documents')
 @UseGuards(JwtAuthGuard)
 export class DocumentsController {
-  constructor(private readonly documentsService: DocumentsService) {}
+  constructor(@Inject(DocumentsService) private readonly documentsService: DocumentsService) {}
 
   @Post('upload')
   @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
@@ -66,5 +67,12 @@ export class DocumentsController {
   @UseGuards(RolesGuard)
   async findOne(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.documentsService.findOne(id, user);
+  }
+
+  @Post(':id/process')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async processDocument(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentsService.processDocument(id, user);
   }
 }

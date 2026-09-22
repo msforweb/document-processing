@@ -9,7 +9,7 @@ import { DocumentsService } from './documents.service';
 @Module({
   imports: [AuthModule],
   controllers: [DocumentsController],
-  providers: [DocumentsService, LocalStorageService, JwtAuthGuard, RolesGuard],
+  providers: [DocumentsService, LocalStorageService, RolesGuard, JwtAuthGuard],
   exports: [DocumentsService],
 })
 export class DocumentsModule {}

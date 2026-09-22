@@ -77,6 +77,44 @@ export class DocumentsService {
     return document;
   }
 
+  async processDocument(id: string, user: AuthUser) {
+    const document = await this.prisma.document.findFirst({
+      where: { id, organizationId: user.organizationId },
+    });
+
+    if (!document) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    const documentType = document.documentType === 'UNKNOWN' ? this.detectDocumentType(document.filename) : document.documentType;
+    const nextStatus = document.status === 'UPLOADED' ? 'PROCESSING' : document.status === 'PROCESSING' ? 'EXTRACTED' : document.status;
+
+    const updatedDocument = await this.prisma.document.update({
+      where: { id },
+      data: {
+        status: nextStatus,
+        documentType,
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        organizationId: user.organizationId,
+        userId: user.id,
+        documentId: updatedDocument.id,
+        action: 'DOCUMENT_PROCESSED',
+        metadata: {
+          filename: document.filename,
+          previousStatus: document.status,
+          newStatus: updatedDocument.status,
+          documentType: updatedDocument.documentType,
+        },
+      },
+    });
+
+    return updatedDocument;
+  }
+
   private detectDocumentType(filename: string): 'INVOICE' | 'BANK_STATEMENT' | 'KYC' | 'COMPLIANCE_REPORT' | 'UNKNOWN' {
     const normalized = filename.toLowerCase();
 

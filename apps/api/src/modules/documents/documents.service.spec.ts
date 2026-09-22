@@ -8,6 +8,7 @@ describe('DocumentsService', () => {
       create: jest.fn(),
       findMany: jest.fn(),
       findFirst: jest.fn(),
+      update: jest.fn(),
     },
     auditLog: {
       create: jest.fn(),
@@ -66,5 +67,47 @@ describe('DocumentsService', () => {
 
   it('rejects empty uploads', async () => {
     await expect(service.upload([], { id: 'user-1', organizationId: 'org-1', email: 'admin@example.com', role: 'ADMIN' })).rejects.toThrow(BadRequestException);
+  });
+
+  it('moves a document through the intake workflow', async () => {
+    prismaMock.document.findFirst.mockResolvedValue({
+      id: 'doc-2',
+      organizationId: 'org-1',
+      filename: 'invoice-2026.pdf',
+      mimeType: 'application/pdf',
+      size: 5120,
+      status: 'UPLOADED',
+      documentType: 'UNKNOWN',
+    });
+
+    prismaMock.document.update.mockResolvedValue({
+      id: 'doc-2',
+      organizationId: 'org-1',
+      filename: 'invoice-2026.pdf',
+      mimeType: 'application/pdf',
+      size: 5120,
+      status: 'PROCESSING',
+      documentType: 'INVOICE',
+    });
+
+    const result = await service.processDocument('doc-2', {
+      id: 'user-1',
+      organizationId: 'org-1',
+      email: 'admin@example.com',
+      role: 'ADMIN',
+    });
+
+    expect(prismaMock.document.findFirst).toHaveBeenCalledWith({
+      where: { id: 'doc-2', organizationId: 'org-1' },
+    });
+    expect(prismaMock.document.update).toHaveBeenCalledWith({
+      where: { id: 'doc-2' },
+      data: {
+        status: 'PROCESSING',
+        documentType: 'INVOICE',
+      },
+    });
+    expect(prismaMock.auditLog.create).toHaveBeenCalled();
+    expect(result.status).toBe('PROCESSING');
   });
 });
