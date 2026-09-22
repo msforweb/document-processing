@@ -1,0 +1,92 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  REVIEWER
+  OPERATOR
+}
+
+enum DocumentStatus {
+  UPLOADED
+  PROCESSING
+  EXTRACTED
+  VALIDATING
+  REVIEW_REQUIRED
+  APPROVED
+  REJECTED
+  FAILED
+}
+
+enum DocumentType {
+  INVOICE
+  BANK_STATEMENT
+  KYC
+  COMPLIANCE_REPORT
+  UNKNOWN
+}
+
+model Organization {
+  id        String    @id @default(cuid())
+  name      String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  users     User[]
+  documents Document[]
+  auditLogs AuditLog[]
+}
+
+model User {
+  id             String       @id @default(cuid())
+  organizationId  String
+  email          String       @unique
+  passwordHash   String
+  name           String
+  role           UserRole     @default(OPERATOR)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  auditLogs      AuditLog[]
+
+  @@index([organizationId])
+}
+
+model Document {
+  id             String         @id @default(cuid())
+  organizationId  String
+  filename       String
+  mimeType       String
+  size           Int
+  storagePath    String
+  status         DocumentStatus @default(UPLOADED)
+  documentType   DocumentType   @default(UNKNOWN)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  auditLogs      AuditLog[]
+
+  @@index([organizationId, createdAt])
+  @@index([status])
+}
+
+model AuditLog {
+  id            String      @id @default(cuid())
+  organizationId String
+  userId        String?
+  documentId    String?
+  action        String
+  metadata      Json?
+  createdAt     DateTime    @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user          User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  document      Document?   @relation(fields: [documentId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([documentId])
+}

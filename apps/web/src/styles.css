@@ -1,0 +1,47 @@
+:root {
+  font-family: 'IBM Plex Sans', 'Helvetica Neue', sans-serif;
+  color: #182329;
+  background: #f5f7f8;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+button, a { font: inherit; }
+button { cursor: pointer; }
+.app-shell { display: flex; min-height: 100vh; background: radial-gradient(circle at 88% 8%, #e3f3ee 0, transparent 30%), #f5f7f8; }
+.sidebar { width: 248px; display: flex; flex-direction: column; padding: 28px 18px; background: #142d2b; color: #e9f1ed; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 0 12px 48px; font-size: 18px; font-weight: 650; letter-spacing: -.2px; }
+.brand-mark { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 8px; background: #9de3be; color: #153a32; font-weight: 800; }
+.workspace-label, .eyebrow { font-size: 10px; letter-spacing: 1.4px; font-weight: 700; }
+.workspace-label { color: #87a29b; padding: 0 12px 12px; }
+.nav-list { display: grid; gap: 5px; }
+.nav-item { display: flex; align-items: center; gap: 11px; min-height: 42px; padding: 0 12px; border-radius: 7px; color: #a9c0b9; text-decoration: none; font-size: 14px; }
+.nav-item:hover, .nav-item.active { color: #f2fbf7; background: #23443e; }
+.nav-count { margin-left: auto; padding: 2px 7px; border-radius: 10px; background: #365b52; font-size: 11px; }
+.sidebar-bottom { margin-top: auto; }
+.main-content { width: min(1180px, 100%); margin: 0 auto; padding: 36px clamp(24px, 5vw, 72px) 72px; }
+.topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
+.eyebrow { margin: 0 0 10px; color: #84918f; }
+.topbar h1 { margin: 0; font-size: 25px; font-weight: 600; letter-spacing: -.6px; }
+.user-chip { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid #dce5e2; border-radius: 20px; background: #fff; color: #61706d; font-size: 12px; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: #45b982; }
+.hero-row { display: flex; justify-content: space-between; align-items: flex-end; gap: 32px; padding: 82px 0 46px; }
+.accent { color: #33866d; }
+.hero-row h2 { margin: 0; color: #172d2b; font-size: clamp(32px, 4vw, 52px); line-height: 1.03; font-weight: 500; letter-spacing: -2px; }
+.hero-copy { max-width: 510px; margin: 20px 0 0; color: #697875; line-height: 1.6; font-size: 15px; }
+.upload-button, .secondary-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: 6px; font-weight: 600; }
+.upload-button { min-height: 44px; padding: 0 16px; background: #1f6655; color: white; box-shadow: 0 8px 20px #1f66551f; }
+.metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.metric-card { padding: 20px; border: 1px solid #e0e8e5; border-radius: 8px; background: #fff; }
+.metric-card p, .metric-card span { display: block; color: #7b8985; font-size: 12px; }
+.metric-card p { margin: 0 0 18px; }
+.metric-card strong { display: block; color: #183b35; font-size: 29px; font-weight: 550; letter-spacing: -1px; }
+.metric-card span { margin-top: 8px; }
+.empty-panel { display: grid; justify-items: center; margin-top: 44px; padding: 58px 24px; border: 1px dashed #bdcec8; border-radius: 8px; background: #fbfdfc; text-align: center; }
+.empty-icon { display: grid; width: 48px; height: 48px; place-items: center; border-radius: 50%; background: #e4f3ed; color: #31846c; }
+.empty-panel h3 { margin: 18px 0 7px; font-size: 17px; font-weight: 600; }
+.empty-panel p { margin: 0 0 20px; color: #75847f; font-size: 14px; }
+.secondary-button { min-height: 38px; padding: 0 14px; border: 1px solid #d2dfda; background: #fff; color: #286951; }
+@media (max-width: 760px) { .sidebar { width: 66px; padding: 20px 9px; } .brand { padding: 0 10px 42px; } .brand > span:last-child, .workspace-label, .nav-item:not(.active)::after, .nav-item { font-size: 0; } .nav-item svg { flex: 0 0 auto; } .nav-item { justify-content: center; padding: 0; } .nav-count { display: none; } .main-content { padding: 24px 18px 48px; } .hero-row { display: block; padding: 56px 0 32px; } .upload-button { margin-top: 24px; } .metric-grid { grid-template-columns: 1fr; } }
