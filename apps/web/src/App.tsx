@@ -42,6 +42,7 @@ function App(): JSX.Element {
   const [selectedDocumentSummary, setSelectedDocumentSummary] = useState('');
   const [reviewNote, setReviewNote] = useState('');
   const [auditTrail, setAuditTrail] = useState<Array<{ id: string; action: string; metadata?: Record<string, unknown>; createdAt: string }>>([]);
+  const [dashboardSummary, setDashboardSummary] = useState({ totalDocuments: 0, approvedCount: 0, reviewCount: 0, highRiskCount: 0, approvalRate: 0, statusBreakdown: {} as Record<string, number> });
 
   const getPriorityScore = (doc: DocumentRecord): number => {
     let riskScore = 0;
@@ -63,18 +64,23 @@ function App(): JSX.Element {
   const metrics = [
     {
       label: 'Documents today',
-      value: String(documents.length),
-      detail: documents.length ? 'Across active intake' : 'Ready for your first upload',
+      value: String(dashboardSummary.totalDocuments || documents.length),
+      detail: (dashboardSummary.totalDocuments || documents.length) ? 'Across active intake' : 'Ready for your first upload',
     },
     {
-      label: 'Auto-approval rate',
-      value: documents.length ? `${Math.max(0, 100 - reviewCount * 25)}%` : '--',
-      detail: documents.length ? 'Based on current queue' : 'Awaiting processing data',
+      label: 'Approval rate',
+      value: `${dashboardSummary.approvalRate || (documents.length ? Math.max(0, 100 - reviewCount * 25) : 0)}%`,
+      detail: documents.length ? 'Based on current workflow' : 'Awaiting processing data',
     },
     {
       label: 'Needs review',
-      value: String(reviewCount),
-      detail: reviewCount ? 'Awaiting review' : 'No outstanding work',
+      value: String(dashboardSummary.reviewCount || reviewCount),
+      detail: (dashboardSummary.reviewCount || reviewCount) ? 'Awaiting review' : 'No outstanding work',
+    },
+    {
+      label: 'High risk',
+      value: String(dashboardSummary.highRiskCount || reviewQueue.filter((doc) => getPriorityScore(doc) >= 60).length),
+      detail: 'Priority queue items',
     },
   ];
 
@@ -85,6 +91,23 @@ function App(): JSX.Element {
 
     void loadDocuments();
   }, [token]);
+
+  async function loadDashboardSummary(): Promise<void> {
+    if (!token) {
+      return;
+    }
+
+    const response = await fetch('http://localhost:3001/api/documents/dashboard', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (response.ok) {
+      const data = (await response.json()) as typeof dashboardSummary;
+      setDashboardSummary(data);
+    }
+  }
 
   async function loadDocuments(): Promise<void> {
     if (!token) {
@@ -107,6 +130,7 @@ function App(): JSX.Element {
     const data = (await response.json()) as DocumentRecord[];
     setDocuments(data);
     setStatus(data.length ? `Loaded ${data.length} uploaded document(s).` : 'No documents uploaded yet.');
+    await loadDashboardSummary();
   }
 
   async function handleLogin(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -166,7 +190,7 @@ function App(): JSX.Element {
       const uploadedCount = Array.isArray(data) ? data.length : 1;
       setStatus(`Uploaded ${uploadedCount} document(s) successfully.`);
       event.target.value = '';
-      await loadDocuments();
+      await Promise.all([loadDocuments(), loadDashboardSummary()]);
     } catch (error) {
       const messageText = error instanceof Error ? error.message : 'Upload failed.';
       setStatus(messageText);
@@ -262,7 +286,7 @@ function App(): JSX.Element {
       }
 
       setStatus(`Document moved to ${data.status || 'processing'} status.`);
-      await loadDocuments();
+      await Promise.all([loadDocuments(), loadDashboardSummary()]);
     } catch (error) {
       const messageText = error instanceof Error ? error.message : 'Processing failed.';
       setStatus(messageText);
@@ -292,7 +316,7 @@ function App(): JSX.Element {
       }
 
       setStatus(`Document marked as ${data.status || decision}.`);
-      await loadDocuments();
+      await Promise.all([loadDocuments(), loadDashboardSummary()]);
       if (selectedDocumentId === documentId) {
         await loadDocumentSummary(documentId);
       }
@@ -312,6 +336,14 @@ function App(): JSX.Element {
 
     void loadDocumentSummary(selectedDocumentId);
   }, [selectedDocumentId, token]);
+
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+
+    void loadDashboardSummary();
+  }, [token, documents.length]);
 
   useEffect(() => {
     setReviewNote(selectedDocumentDetails?.reviewNote ?? '');

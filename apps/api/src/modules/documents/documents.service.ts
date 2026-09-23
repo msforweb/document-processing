@@ -136,6 +136,31 @@ export class DocumentsService {
     });
   }
 
+  async getDashboardSummary(user: AuthUser) {
+    const documents = await this.prisma.document.findMany({
+      where: { organizationId: user.organizationId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const totalDocuments = documents.length;
+    const approvedCount = documents.filter((document) => document.status === 'APPROVED').length;
+    const reviewCount = documents.filter((document) => ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'].includes(document.status)).length;
+    const highRiskCount = documents.filter((document) => this.getDocumentRiskScore(document) >= 60).length;
+    const approvalRate = totalDocuments > 0 ? Number(((approvedCount / totalDocuments) * 100).toFixed(0)) : 0;
+
+    return {
+      totalDocuments,
+      approvedCount,
+      reviewCount,
+      highRiskCount,
+      approvalRate,
+      statusBreakdown: documents.reduce<Record<string, number>>((accumulator, document) => {
+        accumulator[document.status] = (accumulator[document.status] ?? 0) + 1;
+        return accumulator;
+      }, {}),
+    };
+  }
+
   async processDocument(id: string, user: AuthUser) {
     const document = await this.prisma.document.findFirst({
       where: { id, organizationId: user.organizationId },

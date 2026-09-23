@@ -70,6 +70,13 @@ export class DocumentsController {
     return this.documentsService.getReviewQueue(user);
   }
 
+  @Get('dashboard')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async getDashboardSummary(@CurrentUser() user: AuthUser) {
+    return this.documentsService.getDashboardSummary(user);
+  }
+
   @Get(':id')
   @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
   @UseGuards(RolesGuard)

@@ -215,6 +215,27 @@ describe('DocumentsService', () => {
     expect(result[0]?.action).toBe('DOCUMENT_REVIEWED');
   });
 
+  it('returns a reviewer dashboard summary', async () => {
+    prismaMock.document.findMany.mockResolvedValue([
+      { id: 'd1', organizationId: 'org-1', status: 'APPROVED', documentType: 'INVOICE', vendorName: 'Acme', invoiceNumber: '1001', totalAmount: 100, currency: 'USD', createdAt: new Date() },
+      { id: 'd2', organizationId: 'org-1', status: 'REVIEW_REQUIRED', documentType: 'INVOICE', vendorName: '', invoiceNumber: 'N/A', totalAmount: 0, currency: 'USD', createdAt: new Date() },
+      { id: 'd3', organizationId: 'org-1', status: 'PROCESSING', documentType: 'INVOICE', vendorName: 'Acme', invoiceNumber: '1003', totalAmount: 200, currency: 'USD', createdAt: new Date() },
+      { id: 'd4', organizationId: 'org-1', status: 'REJECTED', documentType: 'INVOICE', vendorName: 'Acme', invoiceNumber: '1004', totalAmount: 300, currency: 'USD', createdAt: new Date() },
+    ]);
+
+    const result = await service.getDashboardSummary({
+      id: 'user-1',
+      organizationId: 'org-1',
+      email: 'admin@example.com',
+      role: 'ADMIN',
+    });
+
+    expect(result.totalDocuments).toBe(4);
+    expect(result.reviewCount).toBe(2);
+    expect(result.approvalRate).toBe(25);
+    expect(result.highRiskCount).toBe(1);
+  });
+
   it('prioritizes high-risk reviews first', async () => {
     prismaMock.document.findMany.mockResolvedValue([
       {
