@@ -212,4 +212,18 @@ describe('DocumentsService', () => {
     expect(result.currency).toBe('USD');
     expect(result.requiresReview).toBe(false);
   });
+
+  it('flags incomplete invoice metadata for review', () => {
+    const result = service.validateInvoice({
+      vendorName: '',
+      invoiceNumber: '',
+      totalAmount: 0,
+      currency: 'USD',
+    });
+
+    expect(result.requiresReview).toBe(true);
+    expect(result.flags).toContain('Missing vendor name');
+    expect(result.flags).toContain('Missing invoice number');
+    expect(result.flags).toContain('Total amount is missing or invalid');
+  });
 });

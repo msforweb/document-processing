@@ -13,6 +13,12 @@ type InvoiceExtractionResult = {
   requiresReview: boolean;
 };
 
+type InvoiceValidationResult = {
+  requiresReview: boolean;
+  flags: string[];
+  riskScore: number;
+};
+
 @Injectable()
 export class DocumentsService {
   constructor(
@@ -119,8 +125,9 @@ export class DocumentsService {
 
     const documentType = document.documentType === 'UNKNOWN' ? this.detectDocumentType(document.filename) : document.documentType;
     const extraction = documentType === 'INVOICE' ? this.extractInvoiceData(document.filename) : null;
+    const validation = documentType === 'INVOICE' ? this.validateInvoice(extraction ?? { vendorName: '', invoiceNumber: '', totalAmount: 0, currency: 'USD' }) : { requiresReview: false, flags: [], riskScore: 0 };
     const nextStatus = document.status === 'UPLOADED' ? 'PROCESSING' : document.status === 'PROCESSING' ? 'EXTRACTED' : document.status;
-    const reviewStatus = extraction?.requiresReview ? 'REVIEW_REQUIRED' : nextStatus;
+    const reviewStatus = validation.requiresReview ? 'REVIEW_REQUIRED' : extraction?.requiresReview ? 'REVIEW_REQUIRED' : nextStatus;
 
     const updatedDocument = await this.prisma.document.update({
       where: { id },
@@ -136,6 +143,22 @@ export class DocumentsService {
         extractedAt: extraction ? new Date() : document.extractedAt ?? null,
       },
     });
+
+    if (validation.flags.length > 0) {
+      await this.prisma.auditLog.create({
+        data: {
+          organizationId: user.organizationId,
+          userId: user.id,
+          documentId: updatedDocument.id,
+          action: 'DOCUMENT_VALIDATION_FLAGGED',
+          metadata: {
+            filename: document.filename,
+            flags: validation.flags,
+            riskScore: validation.riskScore,
+          },
+        },
+      });
+    }
 
     await this.prisma.auditLog.create({
       data: {
@@ -219,6 +242,34 @@ export class DocumentsService {
       totalAmount,
       currency: 'USD',
       requiresReview: false,
+    };
+  }
+
+  validateInvoice(data: Partial<InvoiceExtractionResult>): InvoiceValidationResult {
+    const flags: string[] = [];
+
+    if (!data.vendorName || !data.vendorName.trim()) {
+      flags.push('Missing vendor name');
+    }
+
+    if (!data.invoiceNumber || !data.invoiceNumber.trim() || data.invoiceNumber === 'N/A') {
+      flags.push('Missing invoice number');
+    }
+
+    if (!data.totalAmount || Number(data.totalAmount) <= 0) {
+      flags.push('Total amount is missing or invalid');
+    }
+
+    if (!data.currency || !data.currency.trim()) {
+      flags.push('Missing currency');
+    }
+
+    const riskScore = flags.length * 25;
+
+    return {
+      requiresReview: flags.length > 0 || riskScore >= 50,
+      flags,
+      riskScore,
     };
   }
 
