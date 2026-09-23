@@ -124,6 +124,18 @@ export class DocumentsService {
     };
   }
 
+  async getDocumentAuditTrail(id: string, user: AuthUser) {
+    await this.findOne(id, user);
+
+    return this.prisma.auditLog.findMany({
+      where: {
+        organizationId: user.organizationId,
+        documentId: id,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
   async processDocument(id: string, user: AuthUser) {
     const document = await this.prisma.document.findFirst({
       where: { id, organizationId: user.organizationId },

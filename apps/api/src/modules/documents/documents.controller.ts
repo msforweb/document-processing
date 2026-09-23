@@ -84,6 +84,13 @@ export class DocumentsController {
     return this.documentsService.summarizeDocument(id, user);
   }
 
+  @Get(':id/audit-log')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async getDocumentAuditTrail(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentsService.getDocumentAuditTrail(id, user);
+  }
+
   @Post(':id/process')
   @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
   @UseGuards(RolesGuard)

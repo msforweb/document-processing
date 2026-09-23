@@ -12,6 +12,7 @@ describe('DocumentsService', () => {
     },
     auditLog: {
       create: jest.fn(),
+      findMany: jest.fn(),
     },
   } as any;
 
@@ -178,6 +179,40 @@ describe('DocumentsService', () => {
       orderBy: { createdAt: 'desc' },
     });
     expect(result).toHaveLength(1);
+  });
+
+  it('returns audit history for a selected document', async () => {
+    prismaMock.auditLog.findMany.mockResolvedValue([
+      {
+        id: 'audit-2',
+        action: 'DOCUMENT_REVIEWED',
+        metadata: { decision: 'APPROVED', reviewNote: 'Looks valid' },
+        createdAt: new Date('2026-09-23T09:05:00.000Z'),
+      },
+      {
+        id: 'audit-1',
+        action: 'DOCUMENT_PROCESSED',
+        metadata: { status: 'PROCESSING' },
+        createdAt: new Date('2026-09-23T09:00:00.000Z'),
+      },
+    ]);
+
+    const result = await service.getDocumentAuditTrail('doc-3', {
+      id: 'user-1',
+      organizationId: 'org-1',
+      email: 'admin@example.com',
+      role: 'ADMIN',
+    });
+
+    expect(prismaMock.auditLog.findMany).toHaveBeenCalledWith({
+      where: {
+        organizationId: 'org-1',
+        documentId: 'doc-3',
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(result).toHaveLength(2);
+    expect(result[0]?.action).toBe('DOCUMENT_REVIEWED');
   });
 
   it('prioritizes high-risk reviews first', async () => {

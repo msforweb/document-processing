@@ -41,6 +41,7 @@ function App(): JSX.Element {
   const [selectedDocumentDetails, setSelectedDocumentDetails] = useState<DocumentRecord | null>(null);
   const [selectedDocumentSummary, setSelectedDocumentSummary] = useState('');
   const [reviewNote, setReviewNote] = useState('');
+  const [auditTrail, setAuditTrail] = useState<Array<{ id: string; action: string; metadata?: Record<string, unknown>; createdAt: string }>>([]);
 
   const getPriorityScore = (doc: DocumentRecord): number => {
     let riskScore = 0;
@@ -192,6 +193,19 @@ function App(): JSX.Element {
     const data = (await response.json()) as DocumentRecord & { summary?: string };
     setSelectedDocumentDetails(data);
     setSelectedDocumentSummary(data.summary || 'No summary available.');
+
+    const auditResponse = await fetch(`http://localhost:3001/api/documents/${documentId}/audit-log`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (auditResponse.ok) {
+      const auditData = (await auditResponse.json()) as Array<{ id: string; action: string; metadata?: Record<string, unknown>; createdAt: string }>;
+      setAuditTrail(auditData);
+    } else {
+      setAuditTrail([]);
+    }
   }
 
   async function handleAiSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -542,6 +556,21 @@ function App(): JSX.Element {
                   Risk score: {selectedDocumentDetails.riskScore}/100
                 </p>
               ) : null}
+            </div>
+          ) : null}
+
+          {auditTrail.length ? (
+            <div style={{ marginTop: '18px' }}>
+              <span className="meta-label">Audit trail</span>
+              <ul style={{ margin: '8px 0 0', paddingLeft: '18px' }}>
+                {auditTrail.map((entry) => (
+                  <li key={entry.id} style={{ marginBottom: '8px' }}>
+                    <strong>{entry.action}</strong>
+                    <div>{entry.metadata && typeof entry.metadata === 'object' ? JSON.stringify(entry.metadata) : 'No metadata'}</div>
+                    <small>{new Date(entry.createdAt).toLocaleString()}</small>
+                  </li>
+                ))}
+              </ul>
             </div>
           ) : null}
         </section>
