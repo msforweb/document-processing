@@ -158,6 +158,11 @@ export class DocumentsService {
         accumulator[document.status] = (accumulator[document.status] ?? 0) + 1;
         return accumulator;
       }, {}),
+      typeBreakdown: documents.reduce<Record<string, number>>((accumulator, document) => {
+        const typeKey = document.documentType ?? 'UNKNOWN';
+        accumulator[typeKey] = (accumulator[typeKey] ?? 0) + 1;
+        return accumulator;
+      }, {}),
     };
   }
 

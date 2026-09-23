@@ -19,6 +19,16 @@ type DocumentRecord = {
   reviewNote?: string | null;
 };
 
+type DashboardSummary = {
+  totalDocuments: number;
+  approvedCount: number;
+  reviewCount: number;
+  highRiskCount: number;
+  approvalRate: number;
+  statusBreakdown: Record<string, number>;
+  typeBreakdown: Record<string, number>;
+};
+
 const metrics = [
   { label: 'Documents today', value: '0', detail: 'Ready for your first upload' },
   { label: 'Auto-approval rate', value: '--', detail: 'Awaiting processing data' },
@@ -42,7 +52,15 @@ function App(): JSX.Element {
   const [selectedDocumentSummary, setSelectedDocumentSummary] = useState('');
   const [reviewNote, setReviewNote] = useState('');
   const [auditTrail, setAuditTrail] = useState<Array<{ id: string; action: string; metadata?: Record<string, unknown>; createdAt: string }>>([]);
-  const [dashboardSummary, setDashboardSummary] = useState({ totalDocuments: 0, approvedCount: 0, reviewCount: 0, highRiskCount: 0, approvalRate: 0, statusBreakdown: {} as Record<string, number> });
+  const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary>({
+    totalDocuments: 0,
+    approvedCount: 0,
+    reviewCount: 0,
+    highRiskCount: 0,
+    approvalRate: 0,
+    statusBreakdown: {},
+    typeBreakdown: {},
+  });
 
   const getPriorityScore = (doc: DocumentRecord): number => {
     let riskScore = 0;
@@ -66,6 +84,13 @@ function App(): JSX.Element {
       status,
       count,
       label: status.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()),
+    }))
+    .sort((left, right) => right.count - left.count);
+  const typeBreakdownEntries = Object.entries(dashboardSummary.typeBreakdown ?? {})
+    .map(([type, count]) => ({
+      type,
+      count,
+      label: type.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()),
     }))
     .sort((left, right) => right.count - left.count);
   const metrics = [
@@ -111,7 +136,7 @@ function App(): JSX.Element {
     });
 
     if (response.ok) {
-      const data = (await response.json()) as typeof dashboardSummary;
+      const data = (await response.json()) as DashboardSummary;
       setDashboardSummary(data);
     }
   }
@@ -411,6 +436,26 @@ function App(): JSX.Element {
             )) : (
               <div>
                 <span className="meta-label">No activity yet</span>
+                <strong>0</strong>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="panel-box" aria-label="Document type breakdown">
+          <div className="panel-header">
+            <p className="eyebrow accent">DOCUMENT MIX</p>
+            <h3>Type breakdown</h3>
+          </div>
+          <div className="detail-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', marginTop: '12px' }}>
+            {typeBreakdownEntries.length ? typeBreakdownEntries.map((entry) => (
+              <div key={entry.type}>
+                <span className="meta-label">{entry.label}</span>
+                <strong>{entry.count}</strong>
+              </div>
+            )) : (
+              <div>
+                <span className="meta-label">No document types yet</span>
                 <strong>0</strong>
               </div>
             )}

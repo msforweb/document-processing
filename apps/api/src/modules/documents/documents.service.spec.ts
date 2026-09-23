@@ -234,6 +234,7 @@ describe('DocumentsService', () => {
     expect(result.reviewCount).toBe(2);
     expect(result.approvalRate).toBe(25);
     expect(result.highRiskCount).toBe(1);
+    expect(result.typeBreakdown.INVOICE).toBe(4);
   });
 
   it('prioritizes high-risk reviews first', async () => {
