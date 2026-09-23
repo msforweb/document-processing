@@ -51,6 +51,8 @@ function App(): JSX.Element {
   const [selectedDocumentDetails, setSelectedDocumentDetails] = useState<DocumentRecord | null>(null);
   const [selectedDocumentSummary, setSelectedDocumentSummary] = useState('');
   const [reviewNote, setReviewNote] = useState('');
+  const [queueStatusFilter, setQueueStatusFilter] = useState<'ALL' | 'PROCESSING' | 'EXTRACTED' | 'VALIDATING' | 'REVIEW_REQUIRED'>('ALL');
+  const [onlyHighRisk, setOnlyHighRisk] = useState(false);
   const [auditTrail, setAuditTrail] = useState<Array<{ id: string; action: string; metadata?: Record<string, unknown>; createdAt: string }>>([]);
   const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary>({
     totalDocuments: 0,
@@ -76,8 +78,31 @@ function App(): JSX.Element {
 
   const reviewQueue = documents
     .filter((doc) => ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'].includes(doc.status))
+    .filter((doc) => queueStatusFilter === 'ALL' || doc.status === queueStatusFilter)
+    .filter((doc) => !onlyHighRisk || getPriorityScore(doc) >= 60)
     .map((doc) => ({ ...doc, riskScore: getPriorityScore(doc) }))
     .sort((left, right) => right.riskScore - left.riskScore);
+
+  const buildDocumentPrompt = (doc: DocumentRecord | null): string => {
+    if (!doc) {
+      return message;
+    }
+
+    const fields = [
+      `Document: ${doc.filename}`,
+      `Type: ${doc.documentType}`,
+      `Status: ${doc.status}`,
+      `Vendor: ${doc.vendorName || 'Not extracted'}`,
+      `Invoice number: ${doc.invoiceNumber || 'Not extracted'}`,
+      `Amount: ${doc.totalAmount ? `${doc.totalAmount.toFixed(2)} ${doc.currency || 'USD'}` : 'Not extracted'}`,
+      `Validation flags: ${doc.validationFlags?.length ? doc.validationFlags.join('; ') : 'None'}`,
+      `Risk score: ${doc.riskScore ?? getPriorityScore(doc)}/100`,
+      `Summary: ${doc.summary || selectedDocumentSummary || 'No summary available'}`,
+    ];
+
+    return `Review this document context and provide a concise operational recommendation:\n${fields.join('\n')}`;
+  };
+
   const reviewCount = reviewQueue.length;
   const statusBreakdownEntries = Object.entries(dashboardSummary.statusBreakdown ?? {})
     .map(([status, count]) => ({
@@ -248,7 +273,9 @@ function App(): JSX.Element {
 
     const data = (await response.json()) as DocumentRecord & { summary?: string };
     setSelectedDocumentDetails(data);
-    setSelectedDocumentSummary(data.summary || 'No summary available.');
+    const summaryText = data.summary || 'No summary available.';
+    setSelectedDocumentSummary(summaryText);
+    setMessage(buildDocumentPrompt(data));
 
     const auditResponse = await fetch(`http://localhost:3001/api/documents/${documentId}/audit-log`, {
       headers: {
@@ -291,6 +318,52 @@ function App(): JSX.Element {
       setReply(data.reply || 'No response returned.');
     } catch (error) {
       const messageText = error instanceof Error ? error.message : 'Unexpected error.';
+      setReply(messageText);
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  async function handleDocumentInsight(): Promise<void> {
+    if (!selectedDocumentDetails || !token) {
+      return;
+    }
+
+    setAiLoading(true);
+    setReply('');
+
+    try {
+      const response = await fetch('http://localhost:3001/api/ai/document-insight', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          document: {
+            ...selectedDocumentDetails,
+            validationFlags: selectedDocumentDetails.validationFlags ?? [],
+            riskScore: selectedDocumentDetails.riskScore ?? getPriorityScore(selectedDocumentDetails),
+            summary: selectedDocumentSummary || selectedDocumentDetails.summary || 'No summary available.',
+          },
+        }),
+      });
+
+      const data = (await response.json()) as { recommendation?: string; suggestedAction?: string; explanation?: string; message?: string };
+      if (!response.ok) {
+        throw new Error(data.message || 'Unable to generate a document recommendation.');
+      }
+
+      const insightText = [
+        `Recommendation: ${data.recommendation || 'Review required'}`,
+        `Action: ${data.suggestedAction || 'Escalate for review'}`,
+        `Reason: ${data.explanation || 'Document risk requires a human decision.'}`,
+      ].join('\n');
+
+      setReply(insightText);
+      setMessage((previous) => previous || buildDocumentPrompt(selectedDocumentDetails));
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : 'Unable to create a document recommendation.';
       setReply(messageText);
     } finally {
       setAiLoading(false);
@@ -551,6 +624,24 @@ function App(): JSX.Element {
             <h3>Pending actions</h3>
           </div>
 
+          <div className="detail-grid" style={{ marginTop: '12px', marginBottom: '16px', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+            <label>
+              <span className="meta-label">Status</span>
+              <select value={queueStatusFilter} onChange={(event) => setQueueStatusFilter(event.target.value as 'ALL' | 'PROCESSING' | 'EXTRACTED' | 'VALIDATING' | 'REVIEW_REQUIRED')} style={{ width: '100%', marginTop: '6px' }}>
+                <option value="ALL">All</option>
+                <option value="PROCESSING">Processing</option>
+                <option value="EXTRACTED">Extracted</option>
+                <option value="VALIDATING">Validating</option>
+                <option value="REVIEW_REQUIRED">Review required</option>
+              </select>
+            </label>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '28px' }}>
+              <input type="checkbox" checked={onlyHighRisk} onChange={() => setOnlyHighRisk((value) => !value)} />
+              <span className="meta-label">Only high risk</span>
+            </label>
+          </div>
+
           {reviewQueue.length ? (
             <ul className="document-list review-list">
               {reviewQueue.map((doc) => (
@@ -695,6 +786,12 @@ function App(): JSX.Element {
               placeholder="Ask the AI assistant about a document, a risk exception, or a workflow question..."
             />
             <div className="ai-actions">
+              <button type="button" className="secondary-button" onClick={() => setMessage(buildDocumentPrompt(selectedDocumentDetails))} disabled={!selectedDocumentDetails}>
+                Use selected document
+              </button>
+              <button type="button" className="secondary-button" onClick={() => void handleDocumentInsight()} disabled={!selectedDocumentDetails || aiLoading}>
+                Get recommendation
+              </button>
               <button type="submit" className="secondary-button" disabled={aiLoading}>
                 {aiLoading ? 'Thinking...' : 'Ask AI'}
               </button>

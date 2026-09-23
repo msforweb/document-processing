@@ -81,13 +81,25 @@ export class DocumentsService {
     });
   }
 
-  async getReviewQueue(user: AuthUser) {
+  async getReviewQueue(
+    user: AuthUser,
+    filters: {
+      status?: string;
+      documentType?: string;
+      onlyHighRisk?: boolean;
+    } = {},
+  ) {
+    const statusFilter: string | { in: string[] } = filters.status
+      ? filters.status
+      : {
+          in: ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'],
+        };
+
     const documents = await this.prisma.document.findMany({
       where: {
         organizationId: user.organizationId,
-        status: {
-          in: ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'],
-        },
+        status: statusFilter as any,
+        ...(filters.documentType ? { documentType: filters.documentType as any } : {}),
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -97,6 +109,7 @@ export class DocumentsService {
         ...document,
         riskScore: this.getDocumentRiskScore(document),
       }))
+      .filter((document) => !filters.onlyHighRisk || document.riskScore >= 60)
       .sort((left, right) => right.riskScore - left.riskScore || new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
   }
 
@@ -309,6 +322,9 @@ export class DocumentsService {
 
   validateInvoice(data: Partial<InvoiceExtractionResult>): InvoiceValidationResult {
     const flags: string[] = [];
+    const totalAmount = Number(data.totalAmount ?? 0);
+    const invoiceDate = data.invoiceDate instanceof Date ? new Date(data.invoiceDate) : null;
+    const dueDate = data.dueDate instanceof Date ? new Date(data.dueDate) : null;
 
     if (!data.vendorName || !data.vendorName.trim()) {
       flags.push('Missing vendor name');
@@ -326,7 +342,41 @@ export class DocumentsService {
       flags.push('Missing currency');
     }
 
-    const riskScore = flags.length * 25;
+    const normalizedVendor = (data.vendorName ?? '').trim().toLowerCase();
+    if (normalizedVendor && ['demo', 'sample', 'test', 'placeholder', 'unknown', 'n/a'].some((keyword) => normalizedVendor.includes(keyword))) {
+      flags.push('Vendor name looks like a placeholder or generic test entry');
+    }
+
+    if (invoiceDate && !Number.isNaN(invoiceDate.getTime()) && invoiceDate.getTime() > Date.now() + 24 * 60 * 60 * 1000) {
+      flags.push('Invoice date is in the future');
+    }
+
+    if (invoiceDate && dueDate && !Number.isNaN(invoiceDate.getTime()) && !Number.isNaN(dueDate.getTime()) && dueDate.getTime() < invoiceDate.getTime()) {
+      flags.push('Due date is before invoice date');
+    }
+
+    if (invoiceDate && dueDate && !Number.isNaN(invoiceDate.getTime()) && !Number.isNaN(dueDate.getTime()) && totalAmount >= 50000) {
+      const paymentWindowDays = (dueDate.getTime() - invoiceDate.getTime()) / (24 * 60 * 60 * 1000);
+      if (paymentWindowDays <= 2) {
+        flags.push('Due date is unusually short for a large invoice');
+      }
+    }
+
+    if (totalAmount >= 50000) {
+      flags.push('Large invoice amount may require manual review');
+    }
+
+    const riskScore = flags.reduce((score, flag) => {
+      if (flag === 'Missing vendor name' || flag === 'Missing invoice number') return score + 25;
+      if (flag === 'Total amount is missing or invalid') return score + 20;
+      if (flag === 'Missing currency') return score + 10;
+      if (flag === 'Vendor name looks like a placeholder or generic test entry') return score + 25;
+      if (flag === 'Invoice date is in the future') return score + 20;
+      if (flag === 'Due date is before invoice date') return score + 20;
+      if (flag === 'Due date is unusually short for a large invoice') return score + 20;
+      if (flag === 'Large invoice amount may require manual review') return score + 25;
+      return score + 10;
+    }, 0);
 
     return {
       requiresReview: flags.length > 0 || riskScore >= 50,
@@ -340,13 +390,25 @@ export class DocumentsService {
     invoiceNumber?: string | null;
     totalAmount?: number | string | null;
     currency?: string | null;
+    invoiceDate?: Date | string | null;
+    dueDate?: Date | string | null;
   }): InvoiceValidationResult {
-    return this.validateInvoice({
+    const validationInput: Partial<InvoiceExtractionResult> = {
       vendorName: document.vendorName ?? '',
       invoiceNumber: document.invoiceNumber ?? '',
       totalAmount: Number(document.totalAmount ?? 0),
       currency: document.currency ?? 'USD',
-    });
+    };
+
+    if (document.invoiceDate) {
+      validationInput.invoiceDate = new Date(document.invoiceDate);
+    }
+
+    if (document.dueDate) {
+      validationInput.dueDate = new Date(document.dueDate);
+    }
+
+    return this.validateInvoice(validationInput);
   }
 
   private getDocumentRiskScore(document: {
@@ -355,6 +417,8 @@ export class DocumentsService {
     totalAmount?: number | string | null;
     currency?: string | null;
     status?: string | null;
+    invoiceDate?: Date | string | null;
+    dueDate?: Date | string | null;
   }): number {
     let riskScore = 0;
 
@@ -372,6 +436,21 @@ export class DocumentsService {
 
     if (!document.currency || !document.currency.trim()) {
       riskScore += 15;
+    }
+
+    const invoiceDate = document.invoiceDate ? new Date(document.invoiceDate) : null;
+    const dueDate = document.dueDate ? new Date(document.dueDate) : null;
+
+    if (invoiceDate && !Number.isNaN(invoiceDate.getTime()) && invoiceDate.getTime() > Date.now() + 24 * 60 * 60 * 1000) {
+      riskScore += 20;
+    }
+
+    if (invoiceDate && dueDate && !Number.isNaN(invoiceDate.getTime()) && !Number.isNaN(dueDate.getTime()) && dueDate.getTime() < invoiceDate.getTime()) {
+      riskScore += 20;
+    }
+
+    if (document.totalAmount && Number(document.totalAmount) >= 50000) {
+      riskScore += 20;
     }
 
     if (document.status === 'REVIEW_REQUIRED') {

@@ -1,7 +1,59 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 
+type DocumentInsightContext = {
+  filename?: string;
+  documentType?: string;
+  status?: string;
+  vendorName?: string | null;
+  invoiceNumber?: string | null;
+  totalAmount?: number | string | null;
+  currency?: string | null;
+  validationFlags?: string[];
+  riskScore?: number;
+  summary?: string;
+};
+
 @Injectable()
 export class AiService {
+  buildDocumentInsight(document: DocumentInsightContext) {
+    const flags = document.validationFlags ?? [];
+    const riskScore = Number(document.riskScore ?? 0);
+    const hasHighRiskSignal = riskScore >= 70 || flags.some((flag) => /placeholder|generic test|short due|future date|large invoice/i.test(flag));
+
+    let riskLevel: 'Low' | 'Medium' | 'High' = 'Low';
+    if (riskScore >= 70 || hasHighRiskSignal) {
+      riskLevel = 'High';
+    } else if (riskScore >= 40 || flags.length > 0) {
+      riskLevel = 'Medium';
+    }
+
+    let recommendation = 'Approve';
+    let suggestedAction = 'Proceed with standard approval and maintain normal audit checks.';
+
+    if (riskLevel === 'High') {
+      recommendation = 'Manual review required';
+      suggestedAction = 'Escalate to reviewer and request vendor verification before approval.';
+    } else if (riskLevel === 'Medium') {
+      recommendation = 'Approval with caution';
+      suggestedAction = 'Review the extracted fields, verify payment terms, and confirm the vendor match.';
+    }
+
+    const explanation = [
+      `The ${document.documentType ?? 'document'} ${document.filename ?? 'record'} is currently marked as ${document.status ?? 'unknown'}.`,
+      flags.length
+        ? `The main concerns are: ${flags.slice(0, 3).join('; ')}.`
+        : 'No material validation flags were recorded for this document.',
+      `Current risk score: ${riskScore}/100. ${suggestedAction}`,
+    ].join(' ');
+
+    return {
+      riskLevel,
+      recommendation,
+      suggestedAction,
+      explanation,
+    };
+  }
+
   async chat(message: string) {
     const trimmedMessage = message?.trim();
 

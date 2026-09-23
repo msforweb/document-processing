@@ -5,7 +5,7 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
-import { IsNotEmpty, IsString } from 'class-validator';
+import { IsNotEmpty, IsObject, IsString } from 'class-validator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -15,6 +15,12 @@ class ChatRequestDto {
   @IsString()
   @IsNotEmpty()
   message!: string;
+}
+
+class DocumentInsightRequestDto {
+  @IsObject()
+  @IsNotEmpty()
+  document!: Record<string, unknown>;
 }
 
 @Controller('ai')
@@ -30,5 +36,12 @@ export class AiController {
   @UseGuards(RolesGuard)
   async chat(@Body() dto: ChatRequestDto) {
     return this.aiService.chat(dto.message);
+  }
+
+  @Post('document-insight')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async documentInsight(@Body() dto: DocumentInsightRequestDto) {
+    return this.aiService.buildDocumentInsight(dto.document as any);
   }
 }

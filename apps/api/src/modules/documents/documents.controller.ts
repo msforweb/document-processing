@@ -6,6 +6,7 @@ import {
   Inject,
   Param,
   Post,
+  Query,
   UploadedFiles,
   UseGuards,
   UseInterceptors,
@@ -66,8 +67,17 @@ export class DocumentsController {
   @Get('review-queue')
   @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
   @UseGuards(RolesGuard)
-  async getReviewQueue(@CurrentUser() user: AuthUser) {
-    return this.documentsService.getReviewQueue(user);
+  async getReviewQueue(
+    @CurrentUser() user: AuthUser,
+    @Query('status') status?: string,
+    @Query('documentType') documentType?: string,
+    @Query('onlyHighRisk') onlyHighRisk?: string,
+  ) {
+    return this.documentsService.getReviewQueue(user, {
+      status: status || undefined,
+      documentType: documentType || undefined,
+      onlyHighRisk: onlyHighRisk === 'true' || onlyHighRisk === '1',
+    });
   }
 
   @Get('dashboard')

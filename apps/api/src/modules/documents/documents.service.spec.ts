@@ -181,6 +181,50 @@ describe('DocumentsService', () => {
     expect(result).toHaveLength(1);
   });
 
+  it('filters the review queue to high-risk invoice work', async () => {
+    prismaMock.document.findMany.mockResolvedValue([
+      {
+        id: 'doc-low-risk',
+        organizationId: 'org-1',
+        filename: 'invoice-1001.pdf',
+        status: 'REVIEW_REQUIRED',
+        documentType: 'INVOICE',
+        vendorName: 'Acme Supply',
+        invoiceNumber: '1001',
+        totalAmount: 950,
+        currency: 'USD',
+        createdAt: new Date('2026-09-20T00:00:00.000Z'),
+      },
+      {
+        id: 'doc-high-risk',
+        organizationId: 'org-1',
+        filename: 'invoice-9999.pdf',
+        status: 'REVIEW_REQUIRED',
+        documentType: 'INVOICE',
+        vendorName: '',
+        invoiceNumber: 'N/A',
+        totalAmount: 0,
+        currency: 'USD',
+        createdAt: new Date('2026-09-22T00:00:00.000Z'),
+      },
+    ]);
+
+    const result = await service.getReviewQueue({
+      id: 'user-1',
+      organizationId: 'org-1',
+      email: 'admin@example.com',
+      role: 'ADMIN',
+    }, {
+      status: 'REVIEW_REQUIRED',
+      documentType: 'INVOICE',
+      onlyHighRisk: true,
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.id).toBe('doc-high-risk');
+    expect(result[0]?.riskScore).toBeGreaterThanOrEqual(60);
+  });
+
   it('returns audit history for a selected document', async () => {
     prismaMock.auditLog.findMany.mockResolvedValue([
       {
@@ -330,5 +374,44 @@ describe('DocumentsService', () => {
     expect(result.flags).toContain('Missing vendor name');
     expect(result.flags).toContain('Missing invoice number');
     expect(result.flags).toContain('Total amount is missing or invalid');
+  });
+
+  it('flags suspicious invoice dates and unusually large amounts for review', () => {
+    const invoiceDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const dueDate = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+
+    const result = service.validateInvoice({
+      vendorName: 'Acme Supplies',
+      invoiceNumber: 'INV-2026-9999',
+      invoiceDate,
+      dueDate,
+      totalAmount: 150000,
+      currency: 'USD',
+    });
+
+    expect(result.requiresReview).toBe(true);
+    expect(result.flags).toContain('Invoice date is in the future');
+    expect(result.flags).toContain('Due date is before invoice date');
+    expect(result.flags).toContain('Large invoice amount may require manual review');
+    expect(result.riskScore).toBeGreaterThanOrEqual(60);
+  });
+
+  it('flags placeholder vendor names and short payment windows as compliance risks', () => {
+    const invoiceDate = new Date(Date.now());
+    const dueDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    const result = service.validateInvoice({
+      vendorName: 'Demo Vendor',
+      invoiceNumber: 'INV-2026-9001',
+      invoiceDate,
+      dueDate,
+      totalAmount: 65000,
+      currency: 'USD',
+    });
+
+    expect(result.requiresReview).toBe(true);
+    expect(result.flags).toContain('Vendor name looks like a placeholder or generic test entry');
+    expect(result.flags).toContain('Due date is unusually short for a large invoice');
+    expect(result.riskScore).toBeGreaterThanOrEqual(60);
   });
 });
