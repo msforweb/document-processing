@@ -142,6 +142,8 @@ describe('DocumentsService', () => {
       where: { id: 'doc-3' },
       data: {
         status: 'APPROVED',
+        reviewNote: null,
+        reviewedAt: expect.any(Date),
       },
     });
     expect(prismaMock.auditLog.create).toHaveBeenCalled();

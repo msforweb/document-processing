@@ -97,12 +97,13 @@ export class DocumentsController {
   async reviewDocument(
     @Param('id') id: string,
     @Body('decision') decision: 'APPROVED' | 'REJECTED' | 'REVIEW_REQUIRED',
+    @Body('note') note: string | undefined,
     @CurrentUser() user: AuthUser,
   ) {
     if (!decision) {
       throw new BadRequestException('A review decision is required.');
     }
 
-    return this.documentsService.reviewDocument(id, decision, user);
+    return this.documentsService.reviewDocument(id, decision, user, note);
   }
 }

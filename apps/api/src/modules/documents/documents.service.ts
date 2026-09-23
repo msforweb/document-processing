@@ -191,7 +191,12 @@ export class DocumentsService {
     return updatedDocument;
   }
 
-  async reviewDocument(id: string, decision: 'APPROVED' | 'REJECTED' | 'REVIEW_REQUIRED', user: AuthUser) {
+  async reviewDocument(
+    id: string,
+    decision: 'APPROVED' | 'REJECTED' | 'REVIEW_REQUIRED',
+    user: AuthUser,
+    note?: string,
+  ) {
     const document = await this.prisma.document.findFirst({
       where: { id, organizationId: user.organizationId },
     });
@@ -205,10 +210,14 @@ export class DocumentsService {
       throw new BadRequestException('Unsupported review decision.');
     }
 
+    const reviewNote = note?.trim() || document.reviewNote || null;
+
     const updatedDocument = await this.prisma.document.update({
       where: { id },
       data: {
         status: decision,
+        reviewNote,
+        reviewedAt: new Date(),
       },
     });
 
@@ -222,6 +231,7 @@ export class DocumentsService {
           filename: document.filename,
           previousStatus: document.status,
           decision: updatedDocument.status,
+          reviewNote,
         },
       },
     });

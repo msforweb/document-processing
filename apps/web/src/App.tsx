@@ -16,6 +16,7 @@ type DocumentRecord = {
   summary?: string;
   validationFlags?: string[];
   riskScore?: number;
+  reviewNote?: string | null;
 };
 
 const metrics = [
@@ -39,6 +40,7 @@ function App(): JSX.Element {
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [selectedDocumentDetails, setSelectedDocumentDetails] = useState<DocumentRecord | null>(null);
   const [selectedDocumentSummary, setSelectedDocumentSummary] = useState('');
+  const [reviewNote, setReviewNote] = useState('');
 
   const getPriorityScore = (doc: DocumentRecord): number => {
     let riskScore = 0;
@@ -267,7 +269,7 @@ function App(): JSX.Element {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify({ decision, note: reviewNote.trim() || undefined }),
       });
 
       const data = (await response.json()) as { message?: string; status?: string };
@@ -290,11 +292,16 @@ function App(): JSX.Element {
     if (!selectedDocumentId) {
       setSelectedDocumentDetails(null);
       setSelectedDocumentSummary('');
+      setReviewNote('');
       return;
     }
 
     void loadDocumentSummary(selectedDocumentId);
   }, [selectedDocumentId, token]);
+
+  useEffect(() => {
+    setReviewNote(selectedDocumentDetails?.reviewNote ?? '');
+  }, [selectedDocumentDetails]);
 
   return (
     <div className="app-shell">
@@ -497,6 +504,30 @@ function App(): JSX.Element {
           )}
 
           {selectedDocumentSummary ? <p className="detail-summary">{selectedDocumentSummary}</p> : null}
+
+          {selectedDocumentDetails ? (
+            <div style={{ marginTop: '18px' }}>
+              <label style={{ display: 'block', marginBottom: '8px' }}>
+                <span className="meta-label">Review note</span>
+                <textarea
+                  value={reviewNote}
+                  onChange={(event) => setReviewNote(event.target.value)}
+                  rows={4}
+                  placeholder="Add a note for the reviewer or explain the approval/rejection reason..."
+                  style={{ width: '100%', marginTop: '6px', resize: 'vertical' }}
+                />
+              </label>
+
+              <div className="review-actions" style={{ marginTop: '12px' }}>
+                <button type="button" className="secondary-button compact-button" onClick={() => void handleReviewDocument(selectedDocumentDetails.id, 'APPROVED')}>
+                  Approve
+                </button>
+                <button type="button" className="secondary-button compact-button danger-button" onClick={() => void handleReviewDocument(selectedDocumentDetails.id, 'REJECTED')}>
+                  Reject
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           {selectedDocumentDetails?.validationFlags?.length ? (
             <div style={{ marginTop: '18px' }}>
