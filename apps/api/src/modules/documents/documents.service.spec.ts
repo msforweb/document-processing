@@ -110,4 +110,68 @@ describe('DocumentsService', () => {
     expect(prismaMock.auditLog.create).toHaveBeenCalled();
     expect(result.status).toBe('PROCESSING');
   });
+
+  it('records a human review decision for a document', async () => {
+    prismaMock.document.findFirst.mockResolvedValue({
+      id: 'doc-3',
+      organizationId: 'org-1',
+      filename: 'invoice-2026.pdf',
+      status: 'PROCESSING',
+      documentType: 'INVOICE',
+    });
+
+    prismaMock.document.update.mockResolvedValue({
+      id: 'doc-3',
+      organizationId: 'org-1',
+      filename: 'invoice-2026.pdf',
+      status: 'APPROVED',
+      documentType: 'INVOICE',
+    });
+
+    const result = await service.reviewDocument('doc-3', 'APPROVED', {
+      id: 'user-1',
+      organizationId: 'org-1',
+      email: 'admin@example.com',
+      role: 'ADMIN',
+    });
+
+    expect(prismaMock.document.update).toHaveBeenCalledWith({
+      where: { id: 'doc-3' },
+      data: {
+        status: 'APPROVED',
+      },
+    });
+    expect(prismaMock.auditLog.create).toHaveBeenCalled();
+    expect(result.status).toBe('APPROVED');
+  });
+
+  it('returns only documents that need review', async () => {
+    prismaMock.document.findMany.mockResolvedValue([
+      {
+        id: 'doc-4',
+        organizationId: 'org-1',
+        filename: 'invoice-2026.pdf',
+        status: 'REVIEW_REQUIRED',
+        documentType: 'INVOICE',
+      },
+    ]);
+
+    const result = await service.getReviewQueue({
+      id: 'user-1',
+      organizationId: 'org-1',
+      email: 'admin@example.com',
+      role: 'ADMIN',
+    });
+
+    expect(prismaMock.document.findMany).toHaveBeenCalledWith({
+      where: {
+        organizationId: 'org-1',
+        status: {
+          in: ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(result).toHaveLength(1);
+  });
 });

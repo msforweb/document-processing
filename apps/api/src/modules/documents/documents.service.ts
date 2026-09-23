@@ -65,6 +65,18 @@ export class DocumentsService {
     });
   }
 
+  async getReviewQueue(user: AuthUser) {
+    return this.prisma.document.findMany({
+      where: {
+        organizationId: user.organizationId,
+        status: {
+          in: ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
   async findOne(id: string, user: AuthUser) {
     const document = await this.prisma.document.findFirst({
       where: { id, organizationId: user.organizationId },
@@ -108,6 +120,44 @@ export class DocumentsService {
           previousStatus: document.status,
           newStatus: updatedDocument.status,
           documentType: updatedDocument.documentType,
+        },
+      },
+    });
+
+    return updatedDocument;
+  }
+
+  async reviewDocument(id: string, decision: 'APPROVED' | 'REJECTED' | 'REVIEW_REQUIRED', user: AuthUser) {
+    const document = await this.prisma.document.findFirst({
+      where: { id, organizationId: user.organizationId },
+    });
+
+    if (!document) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    const allowedDecisions = ['APPROVED', 'REJECTED', 'REVIEW_REQUIRED'] as const;
+    if (!allowedDecisions.includes(decision)) {
+      throw new BadRequestException('Unsupported review decision.');
+    }
+
+    const updatedDocument = await this.prisma.document.update({
+      where: { id },
+      data: {
+        status: decision,
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        organizationId: user.organizationId,
+        userId: user.id,
+        documentId: updatedDocument.id,
+        action: 'DOCUMENT_REVIEWED',
+        metadata: {
+          filename: document.filename,
+          previousStatus: document.status,
+          decision: updatedDocument.status,
         },
       },
     });

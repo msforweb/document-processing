@@ -29,7 +29,8 @@ function App(): JSX.Element {
   const [reply, setReply] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
 
-  const reviewCount = documents.filter((doc) => ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'].includes(doc.status)).length;
+  const reviewQueue = documents.filter((doc) => ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'].includes(doc.status));
+  const reviewCount = reviewQueue.length;
   const metrics = [
     {
       label: 'Documents today',
@@ -206,6 +207,36 @@ function App(): JSX.Element {
     }
   }
 
+  async function handleReviewDocument(documentId: string, decision: 'APPROVED' | 'REJECTED' | 'REVIEW_REQUIRED'): Promise<void> {
+    if (!token) {
+      return;
+    }
+
+    setStatus(`Submitting ${decision.toLowerCase()} decision...`);
+
+    try {
+      const response = await fetch(`http://localhost:3001/api/documents/${documentId}/review`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ decision }),
+      });
+
+      const data = (await response.json()) as { message?: string; status?: string };
+      if (!response.ok) {
+        throw new Error(data.message || 'Unable to complete review.');
+      }
+
+      setStatus(`Document marked as ${data.status || decision}.`);
+      await loadDocuments();
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : 'Review failed.';
+      setStatus(messageText);
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -309,6 +340,16 @@ function App(): JSX.Element {
                         Process
                       </button>
                     ) : null}
+                    {doc.status !== 'UPLOADED' && doc.status !== 'APPROVED' && doc.status !== 'REJECTED' ? (
+                      <div className="review-actions">
+                        <button type="button" className="secondary-button compact-button" onClick={() => void handleReviewDocument(doc.id, 'APPROVED')}>
+                          Approve
+                        </button>
+                        <button type="button" className="secondary-button compact-button danger-button" onClick={() => void handleReviewDocument(doc.id, 'REJECTED')}>
+                          Reject
+                        </button>
+                      </div>
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -318,6 +359,34 @@ function App(): JSX.Element {
               </div>
             )}
           </div>
+        </section>
+
+        <section className="panel-box review-panel" aria-label="Review queue">
+          <div className="panel-header">
+            <p className="eyebrow accent">REVIEW QUEUE</p>
+            <h3>Pending actions</h3>
+          </div>
+
+          {reviewQueue.length ? (
+            <ul className="document-list review-list">
+              {reviewQueue.map((doc) => (
+                <li key={doc.id}>
+                  <div>
+                    <strong>{doc.filename}</strong>
+                    <span>{doc.documentType}</span>
+                  </div>
+                  <div className="document-meta">
+                    <small>{doc.status}</small>
+                    <small>{Math.round(doc.size / 1024)} KB</small>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="empty-state">
+              <p>No documents are waiting for review.</p>
+            </div>
+          )}
         </section>
 
         <section className="ai-panel" aria-label="AI assistant">

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   Get,
   Inject,
@@ -62,6 +63,13 @@ export class DocumentsController {
     return this.documentsService.list(user);
   }
 
+  @Get('review-queue')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async getReviewQueue(@CurrentUser() user: AuthUser) {
+    return this.documentsService.getReviewQueue(user);
+  }
+
   @Get(':id')
   @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
   @UseGuards(RolesGuard)
@@ -74,5 +82,20 @@ export class DocumentsController {
   @UseGuards(RolesGuard)
   async processDocument(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.documentsService.processDocument(id, user);
+  }
+
+  @Post(':id/review')
+  @Roles('ADMIN', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async reviewDocument(
+    @Param('id') id: string,
+    @Body('decision') decision: 'APPROVED' | 'REJECTED' | 'REVIEW_REQUIRED',
+    @CurrentUser() user: AuthUser,
+  ) {
+    if (!decision) {
+      throw new BadRequestException('A review decision is required.');
+    }
+
+    return this.documentsService.reviewDocument(id, decision, user);
   }
 }

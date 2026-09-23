@@ -55,6 +55,8 @@ button { cursor: pointer; }
 .document-list strong { display: block; color: #1d2e2d; }
 .document-list span { color: #61706d; font-size: 12px; }
 .document-meta { display: grid; text-align: right; color: #61706d; }
+.review-panel { margin-top: 24px; }
+.review-list li { align-items: flex-start; }
 .empty-state { border: 1px dashed #d5e1dd; border-radius: 10px; padding: 20px; text-align: center; color: #61706d; }
 .ai-panel { margin-top: 28px; padding: 22px; border: 1px solid #dfe7e4; border-radius: 12px; background: #fff; box-shadow: 0 10px 20px rgba(20, 45, 43, 0.03); }
 .ai-panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
