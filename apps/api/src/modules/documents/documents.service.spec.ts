@@ -100,13 +100,16 @@ describe('DocumentsService', () => {
     expect(prismaMock.document.findFirst).toHaveBeenCalledWith({
       where: { id: 'doc-2', organizationId: 'org-1' },
     });
-    expect(prismaMock.document.update).toHaveBeenCalledWith({
-      where: { id: 'doc-2' },
-      data: {
-        status: 'PROCESSING',
-        documentType: 'INVOICE',
-      },
-    });
+    expect(prismaMock.document.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'doc-2' },
+        data: expect.objectContaining({
+          status: 'PROCESSING',
+          documentType: 'INVOICE',
+          currency: 'USD',
+        }),
+      }),
+    );
     expect(prismaMock.auditLog.create).toHaveBeenCalled();
     expect(result.status).toBe('PROCESSING');
   });
@@ -173,5 +176,40 @@ describe('DocumentsService', () => {
       orderBy: { createdAt: 'desc' },
     });
     expect(result).toHaveLength(1);
+  });
+
+  it('creates a human-readable summary for a selected document', async () => {
+    prismaMock.document.findFirst.mockResolvedValue({
+      id: 'doc-5',
+      organizationId: 'org-1',
+      filename: 'invoice-2026.pdf',
+      status: 'REVIEW_REQUIRED',
+      documentType: 'INVOICE',
+      size: 2048,
+      createdAt: new Date('2026-09-23T10:00:00.000Z'),
+    });
+
+    const result = await service.summarizeDocument('doc-5', {
+      id: 'user-1',
+      organizationId: 'org-1',
+      email: 'admin@example.com',
+      role: 'ADMIN',
+    });
+
+    expect(prismaMock.document.findFirst).toHaveBeenCalledWith({
+      where: { id: 'doc-5', organizationId: 'org-1' },
+    });
+    expect(result.summary).toContain('Invoice');
+    expect(result.summary).toContain('Requires review');
+  });
+
+  it('extracts invoice fields for review processing', () => {
+    const result = service.extractInvoiceData('acme-supplies-invoice-1042.pdf');
+
+    expect(result.vendorName).toBe('Acme Supplies');
+    expect(result.invoiceNumber).toBe('1042');
+    expect(result.totalAmount).toBeGreaterThan(0);
+    expect(result.currency).toBe('USD');
+    expect(result.requiresReview).toBe(false);
   });
 });

@@ -77,6 +77,13 @@ export class DocumentsController {
     return this.documentsService.findOne(id, user);
   }
 
+  @Get(':id/summary')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async summarizeDocument(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentsService.summarizeDocument(id, user);
+  }
+
   @Post(':id/process')
   @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
   @UseGuards(RolesGuard)

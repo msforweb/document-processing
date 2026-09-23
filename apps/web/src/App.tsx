@@ -8,6 +8,12 @@ type DocumentRecord = {
   status: string;
   size: number;
   createdAt: string;
+  vendorName?: string | null;
+  invoiceNumber?: string | null;
+  totalAmount?: number | null;
+  currency?: string | null;
+  dueDate?: string | null;
+  summary?: string;
 };
 
 const metrics = [
@@ -28,6 +34,9 @@ function App(): JSX.Element {
   const [message, setMessage] = useState('Summarize the risk flags for a vendor invoice with a missing tax ID.');
   const [reply, setReply] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
+  const [selectedDocumentDetails, setSelectedDocumentDetails] = useState<DocumentRecord | null>(null);
+  const [selectedDocumentSummary, setSelectedDocumentSummary] = useState('');
 
   const reviewQueue = documents.filter((doc) => ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'].includes(doc.status));
   const reviewCount = reviewQueue.length;
@@ -146,6 +155,26 @@ function App(): JSX.Element {
     }
   }
 
+  async function loadDocumentSummary(documentId: string): Promise<void> {
+    if (!token) {
+      return;
+    }
+
+    const response = await fetch(`http://localhost:3001/api/documents/${documentId}/summary`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!response.ok) {
+      return;
+    }
+
+    const data = (await response.json()) as DocumentRecord & { summary?: string };
+    setSelectedDocumentDetails(data);
+    setSelectedDocumentSummary(data.summary || 'No summary available.');
+  }
+
   async function handleAiSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!message.trim()) {
@@ -231,11 +260,24 @@ function App(): JSX.Element {
 
       setStatus(`Document marked as ${data.status || decision}.`);
       await loadDocuments();
+      if (selectedDocumentId === documentId) {
+        await loadDocumentSummary(documentId);
+      }
     } catch (error) {
       const messageText = error instanceof Error ? error.message : 'Review failed.';
       setStatus(messageText);
     }
   }
+
+  useEffect(() => {
+    if (!selectedDocumentId) {
+      setSelectedDocumentDetails(null);
+      setSelectedDocumentSummary('');
+      return;
+    }
+
+    void loadDocumentSummary(selectedDocumentId);
+  }, [selectedDocumentId, token]);
 
   return (
     <div className="app-shell">
@@ -370,7 +412,7 @@ function App(): JSX.Element {
           {reviewQueue.length ? (
             <ul className="document-list review-list">
               {reviewQueue.map((doc) => (
-                <li key={doc.id}>
+                <li key={doc.id} onClick={() => setSelectedDocumentId(doc.id)} style={{ cursor: 'pointer' }}>
                   <div>
                     <strong>{doc.filename}</strong>
                     <span>{doc.documentType}</span>
@@ -387,6 +429,56 @@ function App(): JSX.Element {
               <p>No documents are waiting for review.</p>
             </div>
           )}
+        </section>
+
+        <section className="panel-box details-panel" aria-label="Selected document details">
+          <div className="panel-header">
+            <p className="eyebrow accent">DETAILS</p>
+            <h3>{selectedDocumentDetails ? selectedDocumentDetails.filename : 'Select a document'}</h3>
+          </div>
+
+          {selectedDocumentDetails ? (
+            <div className="detail-grid">
+              <div>
+                <span className="meta-label">Status</span>
+                <strong>{selectedDocumentDetails.status}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Type</span>
+                <strong>{selectedDocumentDetails.documentType}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Vendor</span>
+                <strong>{selectedDocumentDetails.vendorName ?? 'Not extracted'}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Invoice #</span>
+                <strong>{selectedDocumentDetails.invoiceNumber ?? 'Not extracted'}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Amount</span>
+                <strong>{selectedDocumentDetails.totalAmount ? `${selectedDocumentDetails.totalAmount.toFixed(2)} ${selectedDocumentDetails.currency ?? 'USD'}` : 'Not extracted'}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Due</span>
+                <strong>{selectedDocumentDetails.dueDate ? new Date(selectedDocumentDetails.dueDate).toLocaleDateString() : 'Not extracted'}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Size</span>
+                <strong>{Math.round(selectedDocumentDetails.size / 1024)} KB</strong>
+              </div>
+              <div>
+                <span className="meta-label">Uploaded</span>
+                <strong>{new Date(selectedDocumentDetails.createdAt).toLocaleDateString()}</strong>
+              </div>
+            </div>
+          ) : (
+            <div className="empty-state">
+              <p>Select a document from the review queue to inspect the details.</p>
+            </div>
+          )}
+
+          {selectedDocumentSummary ? <p className="detail-summary">{selectedDocumentSummary}</p> : null}
         </section>
 
         <section className="ai-panel" aria-label="AI assistant">
