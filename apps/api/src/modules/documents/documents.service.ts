@@ -82,7 +82,7 @@ export class DocumentsService {
   }
 
   async getReviewQueue(user: AuthUser) {
-    return this.prisma.document.findMany({
+    const documents = await this.prisma.document.findMany({
       where: {
         organizationId: user.organizationId,
         status: {
@@ -91,6 +91,13 @@ export class DocumentsService {
       },
       orderBy: { createdAt: 'desc' },
     });
+
+    return documents
+      .map((document) => ({
+        ...document,
+        riskScore: this.getDocumentRiskScore(document),
+      }))
+      .sort((left, right) => right.riskScore - left.riskScore || new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
   }
 
   async findOne(id: string, user: AuthUser) {
@@ -288,6 +295,38 @@ export class DocumentsService {
       totalAmount: Number(document.totalAmount ?? 0),
       currency: document.currency ?? 'USD',
     });
+  }
+
+  private getDocumentRiskScore(document: {
+    vendorName?: string | null;
+    invoiceNumber?: string | null;
+    totalAmount?: number | string | null;
+    currency?: string | null;
+    status?: string | null;
+  }): number {
+    let riskScore = 0;
+
+    if (!document.vendorName || !document.vendorName.trim()) {
+      riskScore += 30;
+    }
+
+    if (!document.invoiceNumber || !document.invoiceNumber.trim() || document.invoiceNumber === 'N/A') {
+      riskScore += 30;
+    }
+
+    if (!document.totalAmount || Number(document.totalAmount) <= 0) {
+      riskScore += 25;
+    }
+
+    if (!document.currency || !document.currency.trim()) {
+      riskScore += 15;
+    }
+
+    if (document.status === 'REVIEW_REQUIRED') {
+      riskScore += 20;
+    }
+
+    return riskScore;
   }
 
   private buildSummary(

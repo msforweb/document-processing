@@ -178,6 +178,46 @@ describe('DocumentsService', () => {
     expect(result).toHaveLength(1);
   });
 
+  it('prioritizes high-risk reviews first', async () => {
+    prismaMock.document.findMany.mockResolvedValue([
+      {
+        id: 'doc-low-risk',
+        organizationId: 'org-1',
+        filename: 'vendor-invoice-1001.pdf',
+        status: 'PROCESSING',
+        documentType: 'INVOICE',
+        vendorName: 'Acme Supply',
+        invoiceNumber: '1001',
+        totalAmount: 1250,
+        currency: 'USD',
+        createdAt: new Date('2026-09-21T00:00:00.000Z'),
+      },
+      {
+        id: 'doc-high-risk',
+        organizationId: 'org-1',
+        filename: 'invoice-unknown.pdf',
+        status: 'REVIEW_REQUIRED',
+        documentType: 'INVOICE',
+        vendorName: '',
+        invoiceNumber: 'N/A',
+        totalAmount: 0,
+        currency: 'USD',
+        createdAt: new Date('2026-09-22T00:00:00.000Z'),
+      },
+    ]);
+
+    const result = await service.getReviewQueue({
+      id: 'user-1',
+      organizationId: 'org-1',
+      email: 'admin@example.com',
+      role: 'ADMIN',
+    });
+
+    expect(result).toHaveLength(2);
+    expect(result[0]?.id).toBe('doc-high-risk');
+    expect(result[0]?.riskScore ?? 0).toBeGreaterThan(result[1]?.riskScore ?? 0);
+  });
+
   it('creates a human-readable summary for a selected document', async () => {
     prismaMock.document.findFirst.mockResolvedValue({
       id: 'doc-5',

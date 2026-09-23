@@ -40,7 +40,22 @@ function App(): JSX.Element {
   const [selectedDocumentDetails, setSelectedDocumentDetails] = useState<DocumentRecord | null>(null);
   const [selectedDocumentSummary, setSelectedDocumentSummary] = useState('');
 
-  const reviewQueue = documents.filter((doc) => ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'].includes(doc.status));
+  const getPriorityScore = (doc: DocumentRecord): number => {
+    let riskScore = 0;
+
+    if (!doc.vendorName || !doc.vendorName.trim()) riskScore += 30;
+    if (!doc.invoiceNumber || !doc.invoiceNumber.trim() || doc.invoiceNumber === 'N/A') riskScore += 30;
+    if (!doc.totalAmount || Number(doc.totalAmount) <= 0) riskScore += 25;
+    if (!doc.currency || !doc.currency.trim()) riskScore += 15;
+    if (doc.status === 'REVIEW_REQUIRED') riskScore += 20;
+
+    return riskScore;
+  };
+
+  const reviewQueue = documents
+    .filter((doc) => ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'].includes(doc.status))
+    .map((doc) => ({ ...doc, riskScore: getPriorityScore(doc) }))
+    .sort((left, right) => right.riskScore - left.riskScore);
   const reviewCount = reviewQueue.length;
   const metrics = [
     {
@@ -421,6 +436,7 @@ function App(): JSX.Element {
                   </div>
                   <div className="document-meta">
                     <small>{doc.status}</small>
+                    <small>{doc.riskScore >= 60 ? 'High risk' : doc.riskScore >= 30 ? 'Medium risk' : 'Low risk'}</small>
                     <small>{Math.round(doc.size / 1024)} KB</small>
                   </div>
                 </li>
