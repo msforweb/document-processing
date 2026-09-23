@@ -187,6 +187,10 @@ describe('DocumentsService', () => {
       documentType: 'INVOICE',
       size: 2048,
       createdAt: new Date('2026-09-23T10:00:00.000Z'),
+      vendorName: '',
+      invoiceNumber: 'N/A',
+      totalAmount: 0,
+      currency: 'USD',
     });
 
     const result = await service.summarizeDocument('doc-5', {
@@ -201,6 +205,8 @@ describe('DocumentsService', () => {
     });
     expect(result.summary).toContain('Invoice');
     expect(result.summary).toContain('Requires review');
+    expect(result.validationFlags).toContain('Missing vendor name');
+    expect(result.riskScore).toBeGreaterThan(0);
   });
 
   it('extracts invoice fields for review processing', () => {

@@ -107,10 +107,13 @@ export class DocumentsService {
 
   async summarizeDocument(id: string, user: AuthUser) {
     const document = await this.findOne(id, user);
+    const validation = this.getValidationContext(document);
 
     return {
       ...document,
-      summary: this.buildSummary(document),
+      summary: this.buildSummary(document, validation),
+      validationFlags: validation.flags,
+      riskScore: validation.riskScore,
     };
   }
 
@@ -273,13 +276,30 @@ export class DocumentsService {
     };
   }
 
-  private buildSummary(document: {
-    filename: string;
-    documentType?: string;
-    status?: string;
-    size?: number;
-    createdAt?: Date | string;
-  }) {
+  private getValidationContext(document: {
+    vendorName?: string | null;
+    invoiceNumber?: string | null;
+    totalAmount?: number | string | null;
+    currency?: string | null;
+  }): InvoiceValidationResult {
+    return this.validateInvoice({
+      vendorName: document.vendorName ?? '',
+      invoiceNumber: document.invoiceNumber ?? '',
+      totalAmount: Number(document.totalAmount ?? 0),
+      currency: document.currency ?? 'USD',
+    });
+  }
+
+  private buildSummary(
+    document: {
+      filename: string;
+      documentType?: string;
+      status?: string;
+      size?: number;
+      createdAt?: Date | string;
+    },
+    validation: InvoiceValidationResult = { requiresReview: false, flags: [], riskScore: 0 },
+  ) {
     const typeLabel = (document.documentType ?? 'UNKNOWN').replace(/_/g, ' ');
     const formattedType = typeLabel
       .split(' ')
@@ -288,8 +308,13 @@ export class DocumentsService {
     const statusLabel = this.formatStatus(document.status ?? 'UNKNOWN');
     const sizeLabel = this.formatSize(document.size ?? 0);
     const createdAt = document.createdAt ? new Date(document.createdAt).toLocaleDateString() : 'unknown date';
+    const baseSummary = `${formattedType} document is ${statusLabel}. ${sizeLabel} uploaded on ${createdAt}.`;
 
-    return `${formattedType} document is ${statusLabel}. ${sizeLabel} uploaded on ${createdAt}.`;
+    if (!validation.flags.length) {
+      return baseSummary;
+    }
+
+    return `${baseSummary} Validation flags: ${validation.flags.join('; ')}.`;
   }
 
   private formatStatus(status: string): string {

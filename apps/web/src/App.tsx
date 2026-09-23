@@ -14,6 +14,8 @@ type DocumentRecord = {
   currency?: string | null;
   dueDate?: string | null;
   summary?: string;
+  validationFlags?: string[];
+  riskScore?: number;
 };
 
 const metrics = [
@@ -479,6 +481,22 @@ function App(): JSX.Element {
           )}
 
           {selectedDocumentSummary ? <p className="detail-summary">{selectedDocumentSummary}</p> : null}
+
+          {selectedDocumentDetails?.validationFlags?.length ? (
+            <div style={{ marginTop: '18px' }}>
+              <span className="meta-label">Validation flags</span>
+              <ul style={{ margin: '8px 0 0', paddingLeft: '18px', color: '#fbbf24' }}>
+                {selectedDocumentDetails.validationFlags.map((flag) => (
+                  <li key={flag}>{flag}</li>
+                ))}
+              </ul>
+              {selectedDocumentDetails.riskScore !== undefined ? (
+                <p style={{ marginTop: '8px', color: '#fbbf24' }}>
+                  Risk score: {selectedDocumentDetails.riskScore}/100
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </section>
 
         <section className="ai-panel" aria-label="AI assistant">
