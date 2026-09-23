@@ -61,6 +61,13 @@ function App(): JSX.Element {
     .map((doc) => ({ ...doc, riskScore: getPriorityScore(doc) }))
     .sort((left, right) => right.riskScore - left.riskScore);
   const reviewCount = reviewQueue.length;
+  const statusBreakdownEntries = Object.entries(dashboardSummary.statusBreakdown ?? {})
+    .map(([status, count]) => ({
+      status,
+      count,
+      label: status.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()),
+    }))
+    .sort((left, right) => right.count - left.count);
   const metrics = [
     {
       label: 'Documents today',
@@ -388,6 +395,26 @@ function App(): JSX.Element {
               <span>{metric.detail}</span>
             </article>
           ))}
+        </section>
+
+        <section className="panel-box" aria-label="Status breakdown">
+          <div className="panel-header">
+            <p className="eyebrow accent">WORKLOAD</p>
+            <h3>Status breakdown</h3>
+          </div>
+          <div className="detail-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', marginTop: '12px' }}>
+            {statusBreakdownEntries.length ? statusBreakdownEntries.map((entry) => (
+              <div key={entry.status}>
+                <span className="meta-label">{entry.label}</span>
+                <strong>{entry.count}</strong>
+              </div>
+            )) : (
+              <div>
+                <span className="meta-label">No activity yet</span>
+                <strong>0</strong>
+              </div>
+            )}
+          </div>
         </section>
 
         <section className="panel-grid">
