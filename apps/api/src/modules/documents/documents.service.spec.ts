@@ -793,6 +793,22 @@ trailer
     }
   });
 
+  it('uses OCR fallback when a scanned PDF has no embedded text', async () => {
+    const pdfPath = path.resolve(process.cwd(), 'tmp-scanned-invoice.pdf');
+    await fs.writeFile(pdfPath, Buffer.from('%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF'));
+    const ocrSpy = jest.spyOn(service as any, 'extractImageTextWithOcr').mockResolvedValue('ACME SUPPLIES Invoice # INV-3030');
+
+    try {
+      const result = await (service as any).readDocumentTextHint(pdfPath);
+      expect(ocrSpy).toHaveBeenCalledWith(pdfPath);
+      expect(result).toContain('ACME SUPPLIES');
+      expect(result).toContain('INV-3030');
+    } finally {
+      ocrSpy.mockRestore();
+      await fs.unlink(pdfPath).catch(() => undefined);
+    }
+  });
+
   it('extracts invoice fields for review processing', () => {
     const result = service.extractInvoiceData('acme-supplies-invoice-1042.pdf');
 

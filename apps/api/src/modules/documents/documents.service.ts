@@ -897,6 +897,11 @@ export class DocumentsService {
         if (extractedPdfText) {
           return extractedPdfText.slice(0, 20000);
         }
+
+        const extractedImageText = await this.extractImageTextWithOcr(absolutePath);
+        if (extractedImageText) {
+          return extractedImageText.slice(0, 20000);
+        }
       }
 
       if (['.png', '.jpg', '.jpeg'].includes(extension)) {
