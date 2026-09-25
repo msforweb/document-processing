@@ -29,11 +29,34 @@ type DashboardSummary = {
   typeBreakdown: Record<string, number>;
 };
 
-const metrics = [
-  { label: 'Documents today', value: '0', detail: 'Ready for your first upload' },
-  { label: 'Auto-approval rate', value: '--', detail: 'Awaiting processing data' },
-  { label: 'Needs review', value: '0', detail: 'No outstanding work' },
-];
+type ReviewAnalytics = {
+  periodDays: number;
+  totalDocuments: number;
+  approvedCount: number;
+  reviewCount: number;
+  approvalRate: number;
+  riskBreakdown: {
+    low: number;
+    medium: number;
+    high: number;
+  };
+  vendorRisk: Array<{ vendor: string; score: number }>;
+  agingSummary: {
+    reviewRequiredCount: number;
+    avgQueueDays: number;
+    overdueCount: number;
+  };
+  policyExceptions: Array<{
+    type: string;
+    vendor: string;
+    invoiceNumber?: string;
+    severity: 'low' | 'medium' | 'high';
+    detail: string;
+  }>;
+  dailyTrend: Array<{ date: string; total: number; approved: number; review: number }>;
+  statusBreakdown: Record<string, number>;
+  typeBreakdown: Record<string, number>;
+};
 
 function App(): JSX.Element {
   const [email, setEmail] = useState('admin@example.com');
@@ -48,10 +71,13 @@ function App(): JSX.Element {
   const [reply, setReply] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
   const [selectedDocumentDetails, setSelectedDocumentDetails] = useState<DocumentRecord | null>(null);
   const [selectedDocumentSummary, setSelectedDocumentSummary] = useState('');
   const [reviewNote, setReviewNote] = useState('');
   const [queueStatusFilter, setQueueStatusFilter] = useState<'ALL' | 'PROCESSING' | 'EXTRACTED' | 'VALIDATING' | 'REVIEW_REQUIRED'>('ALL');
+  const [queueDocumentTypeFilter, setQueueDocumentTypeFilter] = useState<'ALL' | 'INVOICE' | 'BANK_STATEMENT' | 'KYC' | 'COMPLIANCE_REPORT' | 'UNKNOWN'>('ALL');
+  const [queueSearch, setQueueSearch] = useState('');
   const [onlyHighRisk, setOnlyHighRisk] = useState(false);
   const [auditTrail, setAuditTrail] = useState<Array<{ id: string; action: string; metadata?: Record<string, unknown>; createdAt: string }>>([]);
   const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary>({
@@ -63,6 +89,7 @@ function App(): JSX.Element {
     statusBreakdown: {},
     typeBreakdown: {},
   });
+  const [reviewAnalytics, setReviewAnalytics] = useState<ReviewAnalytics | null>(null);
 
   const getPriorityScore = (doc: DocumentRecord): number => {
     let riskScore = 0;
@@ -79,7 +106,17 @@ function App(): JSX.Element {
   const reviewQueue = documents
     .filter((doc) => ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'].includes(doc.status))
     .filter((doc) => queueStatusFilter === 'ALL' || doc.status === queueStatusFilter)
+    .filter((doc) => queueDocumentTypeFilter === 'ALL' || doc.documentType === queueDocumentTypeFilter)
     .filter((doc) => !onlyHighRisk || getPriorityScore(doc) >= 60)
+    .filter((doc) => {
+      const searchValue = queueSearch.trim().toLowerCase();
+      if (!searchValue) {
+        return true;
+      }
+
+      const sourceText = [doc.filename, doc.vendorName ?? '', doc.invoiceNumber ?? ''].join(' ').toLowerCase();
+      return sourceText.includes(searchValue);
+    })
     .map((doc) => ({ ...doc, riskScore: getPriorityScore(doc) }))
     .sort((left, right) => right.riskScore - left.riskScore);
 
@@ -164,6 +201,49 @@ function App(): JSX.Element {
       const data = (await response.json()) as DashboardSummary;
       setDashboardSummary(data);
     }
+  }
+
+  async function loadReviewAnalytics(): Promise<void> {
+    if (!token) {
+      return;
+    }
+
+    const response = await fetch('http://localhost:3001/api/documents/analytics?days=7', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (response.ok) {
+      const data = (await response.json()) as ReviewAnalytics;
+      setReviewAnalytics(data);
+    }
+  }
+
+  async function handleExportAnalytics(): Promise<void> {
+    if (!token) {
+      return;
+    }
+
+    const response = await fetch('http://localhost:3001/api/documents/analytics/export?days=7', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!response.ok) {
+      setStatus('Unable to export analytics report.');
+      return;
+    }
+
+    const csvText = await response.text();
+    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'review-analytics.csv';
+    link.click();
+    URL.revokeObjectURL(link.href);
+    setStatus('Review analytics report exported.');
   }
 
   async function loadDocuments(): Promise<void> {
@@ -291,6 +371,32 @@ function App(): JSX.Element {
     }
   }
 
+  async function handleExportAuditTrail(documentId: string): Promise<void> {
+    if (!token) {
+      return;
+    }
+
+    const response = await fetch(`http://localhost:3001/api/documents/${documentId}/audit-log/export`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!response.ok) {
+      const data = (await response.json().catch(() => ({}))) as { message?: string };
+      throw new Error(data.message || 'Unable to export the audit log.');
+    }
+
+    const csvText = await response.text();
+    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'document-audit-log.csv';
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   async function handleAiSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!message.trim()) {
@@ -370,6 +476,46 @@ function App(): JSX.Element {
     }
   }
 
+  async function handleExportQueue(): Promise<void> {
+    if (!token) {
+      return;
+    }
+
+    setStatus('Exporting review queue...');
+
+    try {
+      const params = new URLSearchParams();
+      if (queueStatusFilter !== 'ALL') params.set('status', queueStatusFilter);
+      if (queueDocumentTypeFilter !== 'ALL') params.set('documentType', queueDocumentTypeFilter);
+      if (queueSearch.trim()) params.set('search', queueSearch.trim());
+      if (onlyHighRisk) params.set('onlyHighRisk', 'true');
+
+      const response = await fetch(`http://localhost:3001/api/documents/export?${params.toString()}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { message?: string };
+        throw new Error(data.message || 'Unable to export the review queue.');
+      }
+
+      const csvText = await response.text();
+      const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'review-queue.csv';
+      link.click();
+      URL.revokeObjectURL(url);
+      setStatus('Review queue exported successfully.');
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : 'Export failed.';
+      setStatus(messageText);
+    }
+  }
+
   async function handleProcessDocument(documentId: string): Promise<void> {
     if (!token) {
       return;
@@ -412,7 +558,11 @@ function App(): JSX.Element {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ decision, note: reviewNote.trim() || undefined }),
+        body: JSON.stringify({
+          decision,
+          note: reviewNote.trim() || undefined,
+          reason: reviewNote.trim() || undefined,
+        }),
       });
 
       const data = (await response.json()) as { message?: string; status?: string };
@@ -427,6 +577,42 @@ function App(): JSX.Element {
       }
     } catch (error) {
       const messageText = error instanceof Error ? error.message : 'Review failed.';
+      setStatus(messageText);
+    }
+  }
+
+  async function handleBulkReview(decision: 'APPROVED' | 'REJECTED' | 'REVIEW_REQUIRED'): Promise<void> {
+    if (!token || selectedDocumentIds.length === 0) {
+      return;
+    }
+
+    setStatus(`Submitting bulk ${decision.toLowerCase()} decision...`);
+
+    try {
+      const response = await fetch('http://localhost:3001/api/documents/bulk-review', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          documentIds: selectedDocumentIds,
+          decision,
+          note: reviewNote.trim() || undefined,
+          reason: reviewNote.trim() || undefined,
+        }),
+      });
+
+      const data = (await response.json()) as { message?: string; status?: string };
+      if (!response.ok) {
+        throw new Error(data.message || 'Unable to complete the bulk review.');
+      }
+
+      setStatus(`Updated ${selectedDocumentIds.length} document(s) to ${decision.toLowerCase()}.`);
+      setSelectedDocumentIds([]);
+      await Promise.all([loadDocuments(), loadDashboardSummary()]);
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : 'Bulk review failed.';
       setStatus(messageText);
     }
   }
@@ -447,7 +633,7 @@ function App(): JSX.Element {
       return;
     }
 
-    void loadDashboardSummary();
+    void Promise.all([loadDashboardSummary(), loadReviewAnalytics()]);
   }, [token, documents.length]);
 
   useEffect(() => {
@@ -514,6 +700,67 @@ function App(): JSX.Element {
             )}
           </div>
         </section>
+
+        {reviewAnalytics ? (
+          <section className="panel-box" aria-label="Review analytics">
+            <div className="panel-header">
+              <p className="eyebrow accent">OPERATIONS</p>
+              <h3>Review analytics</h3>
+              <button type="button" className="secondary-button" onClick={handleExportAnalytics} style={{ marginLeft: 'auto' }}>
+                Export CSV
+              </button>
+            </div>
+            <div className="detail-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', marginTop: '12px' }}>
+              <div>
+                <span className="meta-label">Approval rate</span>
+                <strong>{reviewAnalytics.approvalRate}%</strong>
+              </div>
+              <div>
+                <span className="meta-label">High risk</span>
+                <strong>{reviewAnalytics.riskBreakdown.high}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Queue aging</span>
+                <strong>{reviewAnalytics.agingSummary.avgQueueDays.toFixed(1)} days</strong>
+              </div>
+              <div>
+                <span className="meta-label">Review required</span>
+                <strong>{reviewAnalytics.agingSummary.reviewRequiredCount}</strong>
+              </div>
+            </div>
+
+            <div style={{ marginTop: '18px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px' }}>
+              <div>
+                <span className="meta-label">Top vendor risk</span>
+                <ul style={{ margin: '8px 0 0', paddingLeft: '18px' }}>
+                  {reviewAnalytics.vendorRisk.length ? reviewAnalytics.vendorRisk.map((entry) => (
+                    <li key={entry.vendor}><strong>{entry.vendor}</strong>: {entry.score}</li>
+                  )) : <li>No vendor data yet</li>}
+                </ul>
+              </div>
+
+              <div>
+                <span className="meta-label">Compliance alerts</span>
+                <ul style={{ margin: '8px 0 0', paddingLeft: '18px' }}>
+                  {reviewAnalytics.policyExceptions.length ? reviewAnalytics.policyExceptions.slice(0, 3).map((entry) => (
+                    <li key={`${entry.type}-${entry.vendor}-${entry.invoiceNumber ?? 'summary'}`}>
+                      <strong>{entry.vendor}</strong> · {entry.type} ({entry.severity})
+                    </li>
+                  )) : <li>No policy exceptions</li>}
+                </ul>
+              </div>
+
+              <div>
+                <span className="meta-label">Daily trend</span>
+                <ul style={{ margin: '8px 0 0', paddingLeft: '18px' }}>
+                  {reviewAnalytics.dailyTrend.slice(-5).map((entry) => (
+                    <li key={entry.date}><strong>{entry.date}</strong>: {entry.review} review / {entry.approved} approved</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </section>
+        ) : null}
 
         <section className="panel-box" aria-label="Document type breakdown">
           <div className="panel-header">
@@ -636,19 +883,70 @@ function App(): JSX.Element {
               </select>
             </label>
 
+            <label>
+              <span className="meta-label">Document type</span>
+              <select value={queueDocumentTypeFilter} onChange={(event) => setQueueDocumentTypeFilter(event.target.value as 'ALL' | 'INVOICE' | 'BANK_STATEMENT' | 'KYC' | 'COMPLIANCE_REPORT' | 'UNKNOWN')} style={{ width: '100%', marginTop: '6px' }}>
+                <option value="ALL">All types</option>
+                <option value="INVOICE">Invoice</option>
+                <option value="BANK_STATEMENT">Bank statement</option>
+                <option value="KYC">KYC</option>
+                <option value="COMPLIANCE_REPORT">Compliance report</option>
+                <option value="UNKNOWN">Unknown</option>
+              </select>
+            </label>
+
+            <label>
+              <span className="meta-label">Search</span>
+              <input
+                type="text"
+                value={queueSearch}
+                onChange={(event) => setQueueSearch(event.target.value)}
+                placeholder="Vendor, invoice, or file"
+                style={{ width: '100%', marginTop: '6px' }}
+              />
+            </label>
+
             <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '28px' }}>
               <input type="checkbox" checked={onlyHighRisk} onChange={() => setOnlyHighRisk((value) => !value)} />
               <span className="meta-label">Only high risk</span>
             </label>
           </div>
 
+          <div className="review-actions" style={{ marginBottom: '12px', justifyContent: 'space-between' }}>
+            <div className="review-actions">
+              {selectedDocumentIds.length ? (
+                <>
+                  <button type="button" className="secondary-button compact-button" onClick={() => void handleBulkReview('APPROVED')}>
+                    Approve selected ({selectedDocumentIds.length})
+                  </button>
+                  <button type="button" className="secondary-button compact-button danger-button" onClick={() => void handleBulkReview('REJECTED')}>
+                    Reject selected ({selectedDocumentIds.length})
+                  </button>
+                </>
+              ) : null}
+            </div>
+            <button type="button" className="secondary-button compact-button" onClick={() => void handleExportQueue()}>
+              Export CSV
+            </button>
+          </div>
+
           {reviewQueue.length ? (
             <ul className="document-list review-list">
               {reviewQueue.map((doc) => (
                 <li key={doc.id} onClick={() => setSelectedDocumentId(doc.id)} style={{ cursor: 'pointer' }}>
-                  <div>
-                    <strong>{doc.filename}</strong>
-                    <span>{doc.documentType}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedDocumentIds.includes(doc.id)}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={() => {
+                        setSelectedDocumentIds((current) => (current.includes(doc.id) ? current.filter((id) => id !== doc.id) : [...current, doc.id]));
+                      }}
+                    />
+                    <div>
+                      <strong>{doc.filename}</strong>
+                      <span>{doc.documentType}</span>
+                    </div>
                   </div>
                   <div className="document-meta">
                     <small>{doc.status}</small>
@@ -756,7 +1054,12 @@ function App(): JSX.Element {
 
           {auditTrail.length ? (
             <div style={{ marginTop: '18px' }}>
-              <span className="meta-label">Audit trail</span>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                <span className="meta-label">Audit trail</span>
+                <button type="button" className="secondary-button compact-button" onClick={() => void handleExportAuditTrail(selectedDocumentDetails!.id)}>
+                  Export audit CSV
+                </button>
+              </div>
               <ul style={{ margin: '8px 0 0', paddingLeft: '18px' }}>
                 {auditTrail.map((entry) => (
                   <li key={entry.id} style={{ marginBottom: '8px' }}>

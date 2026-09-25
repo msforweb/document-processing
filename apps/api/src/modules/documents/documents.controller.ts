@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Inject,
   Param,
   Post,
@@ -72,11 +73,37 @@ export class DocumentsController {
     @Query('status') status?: string,
     @Query('documentType') documentType?: string,
     @Query('onlyHighRisk') onlyHighRisk?: string,
+    @Query('search') search?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
   ) {
     return this.documentsService.getReviewQueue(user, {
       status: status || undefined,
       documentType: documentType || undefined,
       onlyHighRisk: onlyHighRisk === 'true' || onlyHighRisk === '1',
+      search: search || undefined,
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
+  @Get('export')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="review-queue.csv"')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async exportReviewQueue(
+    @CurrentUser() user: AuthUser,
+    @Query('status') status?: string,
+    @Query('documentType') documentType?: string,
+    @Query('onlyHighRisk') onlyHighRisk?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.documentsService.exportReviewQueue(user, {
+      status: status || undefined,
+      documentType: documentType || undefined,
+      onlyHighRisk: onlyHighRisk === 'true' || onlyHighRisk === '1',
+      search: search || undefined,
     });
   }
 
@@ -85,6 +112,22 @@ export class DocumentsController {
   @UseGuards(RolesGuard)
   async getDashboardSummary(@CurrentUser() user: AuthUser) {
     return this.documentsService.getDashboardSummary(user);
+  }
+
+  @Get('analytics')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async getReviewAnalytics(@CurrentUser() user: AuthUser, @Query('days') days?: string) {
+    return this.documentsService.getReviewAnalytics(user, days ? Number(days) : 7);
+  }
+
+  @Get('analytics/export')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="review-analytics.csv"')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async exportReviewAnalytics(@CurrentUser() user: AuthUser, @Query('days') days?: string) {
+    return this.documentsService.exportReviewAnalytics(user, days ? Number(days) : 7);
   }
 
   @Get(':id')
@@ -108,11 +151,41 @@ export class DocumentsController {
     return this.documentsService.getDocumentAuditTrail(id, user);
   }
 
+  @Get(':id/audit-log/export')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="document-audit-log.csv"')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async exportDocumentAuditTrail(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentsService.exportDocumentAuditTrail(id, user);
+  }
+
   @Post(':id/process')
   @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
   @UseGuards(RolesGuard)
   async processDocument(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.documentsService.processDocument(id, user);
+  }
+
+  @Post('bulk-review')
+  @Roles('ADMIN', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async bulkReviewDocuments(
+    @Body('documentIds') documentIds: string[],
+    @Body('decision') decision: 'APPROVED' | 'REJECTED' | 'REVIEW_REQUIRED',
+    @Body('note') note: string | undefined,
+    @Body('reason') reason: string | undefined,
+    @CurrentUser() user: AuthUser,
+  ) {
+    if (!decision) {
+      throw new BadRequestException('A review decision is required.');
+    }
+
+    if (!Array.isArray(documentIds) || documentIds.length === 0) {
+      throw new BadRequestException('At least one document ID is required.');
+    }
+
+    return this.documentsService.bulkReviewDocuments(documentIds, decision, user, note, reason);
   }
 
   @Post(':id/review')
@@ -122,12 +195,13 @@ export class DocumentsController {
     @Param('id') id: string,
     @Body('decision') decision: 'APPROVED' | 'REJECTED' | 'REVIEW_REQUIRED',
     @Body('note') note: string | undefined,
+    @Body('reason') reason: string | undefined,
     @CurrentUser() user: AuthUser,
   ) {
     if (!decision) {
       throw new BadRequestException('A review decision is required.');
     }
 
-    return this.documentsService.reviewDocument(id, decision, user, note);
+    return this.documentsService.reviewDocument(id, decision, user, note, reason);
   }
 }
