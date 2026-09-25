@@ -777,6 +777,22 @@ trailer
     }
   });
 
+  it('uses OCR fallback for scanned images before parsing invoice fields', async () => {
+    const imagePath = path.resolve(process.cwd(), 'tmp-scan.png');
+    await fs.writeFile(imagePath, Buffer.from('fake-png-content'));
+    const ocrSpy = jest.spyOn(service as any, 'extractImageTextWithOcr').mockResolvedValue('ACME SUPPLIES Invoice # INV-2048');
+
+    try {
+      const result = await (service as any).readDocumentTextHint(imagePath);
+      expect(ocrSpy).toHaveBeenCalledWith(imagePath);
+      expect(result).toContain('ACME SUPPLIES');
+      expect(result).toContain('INV-2048');
+    } finally {
+      ocrSpy.mockRestore();
+      await fs.unlink(imagePath).catch(() => undefined);
+    }
+  });
+
   it('extracts invoice fields for review processing', () => {
     const result = service.extractInvoiceData('acme-supplies-invoice-1042.pdf');
 

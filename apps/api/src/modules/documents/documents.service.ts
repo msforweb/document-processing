@@ -1,4 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -898,11 +899,40 @@ export class DocumentsService {
         }
       }
 
+      if (['.png', '.jpg', '.jpeg'].includes(extension)) {
+        const extractedImageText = await this.extractImageTextWithOcr(absolutePath);
+        if (extractedImageText) {
+          return extractedImageText.slice(0, 20000);
+        }
+      }
+
       const decoded = fileBuffer.toString('latin1');
       return decoded.replace(/\0/g, ' ').replace(/[^\x20-\x7E\r\n]/g, ' ').slice(0, 20000);
     } catch {
       return '';
     }
+  }
+
+  private async extractImageTextWithOcr(filePath: string): Promise<string> {
+    const binaryCandidates = [process.env.TESSERACT_PATH?.trim(), 'tesseract'].filter(Boolean) as string[];
+
+    for (const binary of binaryCandidates) {
+      try {
+        const output = execFileSync(binary, [filePath, 'stdout', '--psm', '6'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        const cleaned = String(output ?? '').replace(/\s+/g, ' ').trim();
+        if (cleaned) {
+          return cleaned;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return '';
   }
 
   private extractPdfText(buffer: Buffer): string {
