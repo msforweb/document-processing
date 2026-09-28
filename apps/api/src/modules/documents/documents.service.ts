@@ -468,7 +468,11 @@ export class DocumentsService {
           message: escalation.detail,
         };
         if (!existing) {
-          await this.prisma.notification.create({ data });
+          try {
+            await this.prisma.notification.create({ data });
+          } catch (error) {
+            if (!(error && typeof error === 'object' && 'code' in error && error.code === 'P2002')) throw error;
+          }
         } else if (existing.resolvedAt) {
           await this.prisma.notification.update({ where: { id: existing.id }, data: { ...data, readAt: null, resolvedAt: null } });
         }
@@ -485,6 +489,27 @@ export class DocumentsService {
       data: { resolvedAt: new Date() },
     });
     return { evaluated: escalations.length, notified: escalations.reduce((total, escalation) => total + (admins?.length ?? 0) + (reviewersByDocument.get(escalation.documentId) ? 1 : 0), 0), escalations };
+  }
+
+  async evaluateEscalationsForAllOrganizations() {
+    const organizations = await this.prisma.document.findMany({
+      where: { status: { in: ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'] } },
+      distinct: ['organizationId'],
+      select: { organizationId: true },
+    });
+    let evaluated = 0;
+    let notified = 0;
+    for (const { organizationId } of organizations) {
+      const result = await this.evaluateEscalations({
+        id: 'sla-scheduler',
+        organizationId,
+        email: 'sla-scheduler@local',
+        role: 'ADMIN',
+      });
+      evaluated += result.evaluated;
+      notified += result.notified;
+    }
+    return { organizations: organizations.length, evaluated, notified };
   }
 
   async getNotifications(user: AuthUser) {
