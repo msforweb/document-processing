@@ -1,16 +1,21 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { execFileSync } from 'node:child_process';
+import { BadRequestException, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { PrismaService } from '../../prisma/prisma.service';
 import type { AuthUser } from '../../types/auth-user';
 import { LocalStorageService } from '../../storage/local-storage.service';
+import { ProcessingQueueService } from './processing-queue.service';
+import { DocumentAiProvider } from './processing/document-ai-provider';
+import { DocumentExtractionPipeline } from './processing/document-extraction.pipeline';
+import { LocalDocumentAiProvider } from './processing/local-document-ai.provider';
 
 type InvoiceExtractionResult = {
   vendorName: string;
   invoiceNumber: string;
-  invoiceDate: Date;
-  dueDate: Date;
+  invoiceDate: Date | null;
+  dueDate: Date | null;
   totalAmount: number;
   currency: string;
   requiresReview: boolean;
@@ -24,12 +29,20 @@ type InvoiceValidationResult = {
 
 @Injectable()
 export class DocumentsService {
+  private readonly extractionPipeline: DocumentExtractionPipeline;
+
   constructor(
     @Inject(PrismaService)
     private readonly prisma: PrismaService,
     @Inject(LocalStorageService)
     private readonly storageService: LocalStorageService,
-  ) {}
+    @Optional() @Inject(ProcessingQueueService)
+    private readonly processingQueue?: ProcessingQueueService,
+    @Optional() @Inject(LocalDocumentAiProvider)
+    documentAiProvider?: DocumentAiProvider,
+  ) {
+    this.extractionPipeline = new DocumentExtractionPipeline(documentAiProvider ?? new LocalDocumentAiProvider());
+  }
 
   async upload(files: Express.Multer.File[], user: AuthUser) {
     if (!files || files.length === 0) {
@@ -78,10 +91,13 @@ export class DocumentsService {
   }
 
   async list(user: AuthUser) {
-    return this.prisma.document.findMany({
+    const documents = await this.prisma.document.findMany({
       where: { organizationId: user.organizationId },
       orderBy: { createdAt: 'desc' },
+      include: { assignedReviewer: { select: { id: true, name: true, email: true } }, fraudAssessment: true },
     });
+
+    return documents.map((document) => this.withReviewMetadata(document));
   }
 
   async exportReviewQueue(
@@ -96,7 +112,7 @@ export class DocumentsService {
     } = {},
   ) {
     const documents = await this.getReviewQueue(user, filters);
-    const headers = ['id', 'filename', 'documentType', 'status', 'vendorName', 'invoiceNumber', 'totalAmount', 'currency', 'createdAt', 'riskScore'];
+    const headers = ['id', 'filename', 'documentType', 'status', 'vendorName', 'invoiceNumber', 'totalAmount', 'currency', 'createdAt', 'riskScore', 'recommendedReviewLane', 'recommendedReviewer'];
     const rows = documents.map((document) => [
       document.id,
       document.filename,
@@ -108,6 +124,8 @@ export class DocumentsService {
       document.currency ?? '',
       new Date(document.createdAt).toISOString(),
       String((document as typeof document & { riskScore?: number }).riskScore ?? this.getDocumentRiskScore(document)),
+      (document as typeof document & { recommendedReviewLane?: string }).recommendedReviewLane ?? this.getRecommendedReviewLane(document, this.getDocumentRiskScore(document)),
+      (document as typeof document & { recommendedReviewer?: string }).recommendedReviewer ?? this.getRecommendedReviewer(document, this.getDocumentRiskScore(document)),
     ]);
 
     const escapeCsvCell = (value: string | number | null | undefined) => {
@@ -220,14 +238,12 @@ export class DocumentsService {
     const documents = await this.prisma.document.findMany({
       where,
       orderBy: { createdAt: 'desc' },
+      include: { assignedReviewer: { select: { id: true, name: true, email: true } }, fraudAssessment: true },
       ...(requiresPagination ? { skip: (activePage - 1) * activeLimit, take: activeLimit } : {}),
     });
 
     const enrichedDocuments = documents
-      .map((document) => ({
-        ...document,
-        riskScore: this.getDocumentRiskScore(document),
-      }))
+      .map((document) => this.withReviewMetadata(document))
       .filter((document) => !filters.onlyHighRisk || document.riskScore >= 60)
       .sort((left, right) => right.riskScore - left.riskScore || new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 
@@ -247,16 +263,337 @@ export class DocumentsService {
     return enrichedDocuments;
   }
 
+  async recalculateVendorRiskProfiles(user: AuthUser) {
+    const documents = await this.prisma.document.findMany({ where: { organizationId: user.organizationId }, orderBy: { createdAt: 'asc' } });
+    const vendors = new Map<string, typeof documents>();
+    for (const document of documents) {
+      const vendorName = (document.vendorName ?? '').trim();
+      if (!vendorName || /^(unknown|n\/a|not available)$/i.test(vendorName)) continue;
+      const vendorKey = vendorName.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const currency = (document.currency ?? 'USD').toUpperCase();
+      const key = `${vendorKey}:${currency}`;
+      vendors.set(key, [...(vendors.get(key) ?? []), document]);
+    }
+
+    for (const [vendorCurrencyKey, vendorDocuments] of vendors) {
+      const [vendorKey, currency = 'USD'] = vendorCurrencyKey.split(':');
+      if (!vendorKey) continue;
+      const vendorName = (vendorDocuments.find((document) => document.vendorName?.trim())?.vendorName ?? 'Unknown').trim();
+      const highRiskCount = vendorDocuments.filter((document) => this.getDocumentRiskScore(document) >= 60).length;
+      const invoiceAmounts = vendorDocuments.map((document) => Number(document.totalAmount ?? 0)).filter((amount) => amount > 0);
+      const averageInvoiceAmount = invoiceAmounts.length ? invoiceAmounts.reduce((sum, amount) => sum + amount, 0) / invoiceAmounts.length : null;
+      const invoiceCounts = new Map<string, number>();
+      for (const document of vendorDocuments) {
+        const invoiceNumber = (document.invoiceNumber ?? '').trim();
+        if (invoiceNumber && invoiceNumber !== 'N/A') {
+          const normalized = this.normalizeInvoiceComparisonKey(invoiceNumber);
+          invoiceCounts.set(normalized, (invoiceCounts.get(normalized) ?? 0) + 1);
+        }
+      }
+      const duplicateInvoiceCount = [...invoiceCounts.values()].reduce((sum, count) => sum + Math.max(0, count - 1), 0);
+      const signals: string[] = [];
+      if (duplicateInvoiceCount > 0) signals.push(`${duplicateInvoiceCount} repeated invoice number(s)`);
+      if (highRiskCount >= 2 && highRiskCount / vendorDocuments.length >= 0.4) signals.push('Repeated high-risk submissions');
+
+      // Flag possible invoice splitting: several near-threshold bills within one week.
+      const nearThresholdInvoices = vendorDocuments
+        .filter((document) => {
+          const amount = Number(document.totalAmount ?? 0);
+          return amount >= 10000 && amount < 50000 && document.documentType === 'INVOICE';
+        })
+        .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
+      let splitPaymentDetected = false;
+      for (let start = 0; start < nearThresholdInvoices.length && !splitPaymentDetected; start += 1) {
+        let amountSum = 0;
+        const startTime = new Date(nearThresholdInvoices[start]?.createdAt ?? 0).getTime();
+        for (let end = start; end < nearThresholdInvoices.length; end += 1) {
+          const current = nearThresholdInvoices[end];
+          if (!current || new Date(current.createdAt).getTime() - startTime > 7 * 24 * 60 * 60 * 1000) break;
+          amountSum += Number(current.totalAmount ?? 0);
+          if (end > start && amountSum >= 50000) {
+            splitPaymentDetected = true;
+            break;
+          }
+        }
+      }
+      if (splitPaymentDetected) signals.push('Multiple near-threshold invoices total at least 50,000 within seven days');
+
+      const maxAmount = invoiceAmounts.length ? Math.max(...invoiceAmounts) : 0;
+      const typicalAmounts = invoiceAmounts.filter((amount) => amount < maxAmount);
+      const typicalAverage = typicalAmounts.length ? typicalAmounts.reduce((sum, amount) => sum + amount, 0) / typicalAmounts.length : 0;
+      const amountSpikeDetected = invoiceAmounts.length >= 3 && maxAmount >= Math.max(10000, typicalAverage * 2.5);
+      if (amountSpikeDetected) signals.push('Invoice amount is at least 2.5x the vendor baseline');
+
+      const averageRisk = vendorDocuments.reduce((sum, document) => sum + this.getDocumentRiskScore(document), 0) / vendorDocuments.length;
+      const score = Math.min(100, Math.round(
+        averageRisk * 0.45 + (highRiskCount / vendorDocuments.length) * 25 +
+        (duplicateInvoiceCount > 0 ? 25 : 0) + (splitPaymentDetected ? 30 : 0) + (amountSpikeDetected ? 20 : 0),
+      ));
+      await this.prisma.vendorRiskProfile.upsert({
+        where: { organizationId_vendorKey: { organizationId: user.organizationId, vendorKey: vendorCurrencyKey } },
+        create: {
+          organizationId: user.organizationId,
+          vendorKey: vendorCurrencyKey,
+          vendorName,
+          currency,
+          score,
+          documentCount: vendorDocuments.length,
+          highRiskCount,
+          duplicateInvoiceCount,
+          averageInvoiceAmount,
+          signals,
+          evaluatedAt: new Date(),
+        },
+        update: {
+          vendorName,
+          currency,
+          score,
+          documentCount: vendorDocuments.length,
+          highRiskCount,
+          duplicateInvoiceCount,
+          averageInvoiceAmount,
+          signals,
+          evaluatedAt: new Date(),
+        },
+      });
+    }
+    return this.getVendorRiskProfiles(user);
+  }
+
+  async getVendorRiskProfiles(user: AuthUser) {
+    return this.prisma.vendorRiskProfile.findMany({
+      where: { organizationId: user.organizationId },
+      orderBy: [{ score: 'desc' }, { vendorName: 'asc' }],
+      take: 100,
+    });
+  }
+
+  async recalculateFraudAssessments(user: AuthUser) {
+    const documents = await this.prisma.document.findMany({
+      where: { organizationId: user.organizationId, documentType: 'INVOICE' },
+      orderBy: { createdAt: 'asc' },
+    });
+    const assessments = [];
+    for (const document of documents) {
+      const assessment = await this.assessFraudDocument(document, documents);
+      if (assessment) assessments.push(assessment);
+    }
+    return { assessed: assessments.length, assessments };
+  }
+
+  async getFraudAssessment(id: string, user: AuthUser) {
+    const document = await this.prisma.document.findFirst({
+      where: { id, organizationId: user.organizationId },
+      include: { fraudAssessment: true },
+    });
+    if (!document) throw new NotFoundException('Document not found.');
+    return document.fraudAssessment ?? null;
+  }
+
+  private async assessFraudDocument(document: any, documentSet?: any[]) {
+    if (!this.prisma.fraudAssessment || document.documentType !== 'INVOICE') return null;
+    const documents = documentSet ?? await this.prisma.document.findMany({
+      where: { organizationId: document.organizationId, documentType: 'INVOICE' },
+      orderBy: { createdAt: 'asc' },
+    });
+    const vendorKey = this.normalizeVendorKey(document.vendorName);
+    const currency = (document.currency ?? 'USD').toUpperCase();
+    const invoiceKey = this.normalizeInvoiceComparisonKey(document.invoiceNumber ?? '');
+    const amount = Number(document.totalAmount ?? 0);
+    const createdAt = new Date(document.createdAt).getTime();
+    const vendorDocuments = vendorKey ? documents.filter((item) => this.normalizeVendorKey(item.vendorName) === vendorKey && (item.currency ?? 'USD').toUpperCase() === currency) : [document];
+    const priorVendorDocuments = vendorDocuments.filter((item) => new Date(item.createdAt).getTime() < createdAt);
+    const signals: Array<{ code: string; severity: 'low' | 'medium' | 'high'; weight: number; detail: string }> = [];
+    const addSignal = (code: string, severity: 'low' | 'medium' | 'high', weight: number, detail: string) => signals.push({ code, severity, weight, detail });
+
+    if (invoiceKey && vendorDocuments.some((item) => item.id !== document.id && this.normalizeInvoiceComparisonKey(item.invoiceNumber ?? '') === invoiceKey)) {
+      addSignal('DUPLICATE_INVOICE_NUMBER', 'high', 45, 'Invoice number matches another submission from this vendor.');
+    }
+
+    const historicalAmounts = priorVendorDocuments.map((item) => Number(item.totalAmount ?? 0)).filter((item) => Number.isFinite(item) && item > 0).sort((left, right) => left - right);
+    if (amount > 0 && historicalAmounts.length >= 3) {
+      const middle = Math.floor(historicalAmounts.length / 2);
+      const median = historicalAmounts.length % 2 ? (historicalAmounts[middle] ?? 0) : ((historicalAmounts[middle - 1] ?? 0) + (historicalAmounts[middle] ?? 0)) / 2;
+      if (median > 0 && amount >= 2.5 * median && amount - median >= 5000) {
+        addSignal('VENDOR_AMOUNT_OUTLIER', 'high', 35, `Invoice amount is ${(amount / median).toFixed(1)}× the vendor's historical median.`);
+      }
+    }
+
+    const burstCount = vendorDocuments.filter((item) => Math.abs(new Date(item.createdAt).getTime() - createdAt) <= 24 * 60 * 60 * 1000).length;
+    if (burstCount >= 3) addSignal('RAPID_VENDOR_SUBMISSIONS', 'medium', 25, `${burstCount} invoices from this vendor were submitted within a 24-hour period.`);
+    if (!priorVendorDocuments.length && amount >= 10000) addSignal('NEW_VENDOR_HIGH_VALUE', 'medium', 15, 'High-value invoice received before an earlier submission from this vendor is on record.');
+    if (amount >= 10000 && amount % 1000 === 0) addSignal('ROUND_HIGH_VALUE_AMOUNT', 'low', 8, 'High-value invoice uses a round thousand-unit amount.');
+
+    const invoiceDate = document.invoiceDate ? new Date(document.invoiceDate) : null;
+    const dueDate = document.dueDate ? new Date(document.dueDate) : null;
+    if (invoiceDate && invoiceDate.getTime() > Date.now() + 24 * 60 * 60 * 1000) addSignal('FUTURE_INVOICE_DATE', 'medium', 20, 'Invoice date is more than one day in the future.');
+    if (invoiceDate && dueDate && dueDate.getTime() < invoiceDate.getTime()) addSignal('DUE_BEFORE_INVOICE', 'high', 25, 'Due date precedes the invoice date.');
+
+    const score = Math.min(100, signals.reduce((total, signal) => total + signal.weight, 0));
+    return this.prisma.fraudAssessment.upsert({
+      where: { documentId: document.id },
+      create: { documentId: document.id, score, signals, assessedAt: new Date() },
+      update: { score, signals, assessedAt: new Date() },
+    });
+  }
+
+  private normalizeVendorKey(value?: string | null) {
+    return (value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  async evaluateEscalations(user: AuthUser) {
+    const escalations = await this.getEscalationSummary(user);
+    const activeDocumentIds = escalations.map((entry) => entry.documentId);
+    const [admins, activeDocuments] = await Promise.all([
+      this.prisma.user.findMany({ where: { organizationId: user.organizationId, role: 'ADMIN' }, select: { id: true } }),
+      activeDocumentIds.length
+        ? this.prisma.document.findMany({ where: { id: { in: activeDocumentIds }, organizationId: user.organizationId }, select: { id: true, assignedReviewerId: true } })
+        : Promise.resolve([]),
+    ]);
+    const reviewersByDocument = new Map(activeDocuments.map((document) => [document.id, document.assignedReviewerId]));
+
+    for (const escalation of escalations) {
+      const recipientIds = [...new Set([...(admins ?? []).map((admin) => admin.id), reviewersByDocument.get(escalation.documentId)].filter((id): id is string => Boolean(id)))];
+      const eventKey = `SLA_ESCALATION:${escalation.documentId}`;
+      for (const recipientId of recipientIds) {
+        const existing = await this.prisma.notification.findUnique({ where: { userId_eventKey: { userId: recipientId, eventKey } } });
+        const data = {
+          organizationId: user.organizationId,
+          userId: recipientId,
+          documentId: escalation.documentId,
+          eventKey,
+          type: escalation.type,
+          severity: escalation.severity,
+          title: `${escalation.severity.toUpperCase()} review escalation`,
+          message: escalation.detail,
+        };
+        if (!existing) {
+          await this.prisma.notification.create({ data });
+        } else if (existing.resolvedAt) {
+          await this.prisma.notification.update({ where: { id: existing.id }, data: { ...data, readAt: null, resolvedAt: null } });
+        }
+      }
+    }
+
+    await this.prisma.notification.updateMany({
+      where: {
+        organizationId: user.organizationId,
+        type: 'SLA_ESCALATION',
+        resolvedAt: null,
+        ...(activeDocumentIds.length ? { documentId: { notIn: activeDocumentIds } } : {}),
+      },
+      data: { resolvedAt: new Date() },
+    });
+    return { evaluated: escalations.length, notified: escalations.reduce((total, escalation) => total + (admins?.length ?? 0) + (reviewersByDocument.get(escalation.documentId) ? 1 : 0), 0), escalations };
+  }
+
+  async getNotifications(user: AuthUser) {
+    return this.prisma.notification.findMany({
+      where: { organizationId: user.organizationId, userId: user.id, resolvedAt: null },
+      orderBy: [{ readAt: 'asc' }, { createdAt: 'desc' }],
+      take: 100,
+    });
+  }
+
+  async markNotificationRead(id: string, user: AuthUser) {
+    const result = await this.prisma.notification.updateMany({
+      where: { id, organizationId: user.organizationId, userId: user.id, resolvedAt: null },
+      data: { readAt: new Date() },
+    });
+    if (result.count === 0) throw new NotFoundException('Notification not found.');
+    return { id, read: true };
+  }
+
+  async getReviewerWorkload(user: AuthUser) {
+    const [reviewers, activeAssignments] = await Promise.all([
+      this.prisma.user.findMany({
+        where: { organizationId: user.organizationId, role: 'REVIEWER' },
+        select: { id: true, name: true, email: true },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      }),
+      this.prisma.reviewAssignment.findMany({
+        where: { organizationId: user.organizationId, status: 'ACTIVE' },
+        select: { reviewerId: true },
+      }),
+    ]);
+    const workload = new Map<string, number>();
+    for (const assignment of activeAssignments) workload.set(assignment.reviewerId, (workload.get(assignment.reviewerId) ?? 0) + 1);
+    return reviewers.map((reviewer) => ({ ...reviewer, activeAssignments: workload.get(reviewer.id) ?? 0 }));
+  }
+
+  async assignReviewer(id: string, user: AuthUser, reviewerId?: string) {
+    const document = await this.prisma.document.findFirst({
+      where: { id, organizationId: user.organizationId },
+    });
+    if (!document) throw new NotFoundException('Document not found.');
+    if (!['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'].includes(document.status)) {
+      throw new BadRequestException('Only pending documents can be assigned for review.');
+    }
+
+    const workload = await this.getReviewerWorkload(user);
+    if (!workload.length) throw new BadRequestException('No reviewers are available in this organization.');
+    const chosenReviewer = reviewerId
+      ? workload.find((reviewer) => reviewer.id === reviewerId)
+      : [...workload].sort((left, right) => left.activeAssignments - right.activeAssignments || left.name.localeCompare(right.name) || left.id.localeCompare(right.id))[0];
+    if (!chosenReviewer) throw new BadRequestException('The selected user is not an eligible reviewer in this organization.');
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.reviewAssignment.updateMany({
+        where: { organizationId: user.organizationId, documentId: id, status: 'ACTIVE' },
+        data: { status: 'REASSIGNED', completedAt: new Date() },
+      });
+      const updatedDocument = await tx.document.update({
+        where: { id },
+        data: { assignedReviewerId: chosenReviewer.id },
+      });
+      await tx.reviewAssignment.create({
+        data: {
+          organizationId: user.organizationId,
+          documentId: id,
+          reviewerId: chosenReviewer.id,
+          assignedById: user.id,
+          status: 'ACTIVE',
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          organizationId: user.organizationId,
+          userId: user.id,
+          documentId: id,
+          action: 'DOCUMENT_REVIEWER_ASSIGNED',
+          metadata: { reviewerId: chosenReviewer.id, reviewerName: chosenReviewer.name, assignmentMode: reviewerId ? 'MANUAL' : 'LEAST_LOADED' },
+        },
+      });
+      return { ...updatedDocument, assignedReviewer: chosenReviewer, assignmentMode: reviewerId ? 'MANUAL' : 'LEAST_LOADED' };
+    });
+  }
+
   async findOne(id: string, user: AuthUser) {
     const document = await this.prisma.document.findFirst({
       where: { id, organizationId: user.organizationId },
+      include: {
+        assignedReviewer: { select: { id: true, name: true, email: true } },
+        classification: true,
+        extractedFields: { orderBy: { fieldName: 'asc' } },
+        fraudAssessment: true,
+      },
     });
 
     if (!document) {
       throw new NotFoundException('Document not found.');
     }
 
-    return document;
+    return this.withReviewMetadata(document);
+  }
+
+  async getExtractedFields(id: string, user: AuthUser) {
+    await this.findOne(id, user);
+    return this.prisma.extractedField.findMany({ where: { documentId: id }, orderBy: { fieldName: 'asc' } });
+  }
+
+  async getDocumentClassification(id: string, user: AuthUser) {
+    const document = await this.findOne(id, user);
+    return (document as typeof document & { classification?: unknown }).classification ?? null;
   }
 
   async summarizeDocument(id: string, user: AuthUser) {
@@ -341,6 +678,59 @@ export class DocumentsService {
     };
   }
 
+  async getEscalationSummary(user: AuthUser) {
+    const documents = await this.prisma.document.findMany({
+      where: {
+        organizationId: user.organizationId,
+        status: { in: ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const now = Date.now();
+
+    return documents
+      .map((document) => {
+        const riskScore = this.getDocumentRiskScore(document);
+        const ageDays = Math.max(0, (now - new Date(document.createdAt).getTime()) / (24 * 60 * 60 * 1000));
+        const lane = this.getRecommendedReviewLane(document, riskScore);
+        const reviewer = this.getRecommendedReviewer(document, riskScore);
+        const vendor = (document.vendorName ?? '').trim() || 'Unassigned vendor';
+
+        const eligibleForEscalation = lane === 'FINANCE_REVIEW' || lane === 'BANKING_REVIEW' || lane === 'KYC_REVIEW' || riskScore >= 60;
+        if (!eligibleForEscalation) {
+          return null;
+        }
+
+        const thresholdDays = lane === 'FINANCE_REVIEW' ? 3 : lane === 'BANKING_REVIEW' ? 5 : lane === 'KYC_REVIEW' ? 4 : 2;
+        if (ageDays < thresholdDays) {
+          return null;
+        }
+
+        const severity: 'medium' | 'high' | 'critical' =
+          riskScore >= 80 || ageDays >= 7 ? 'critical' : riskScore >= 60 || Number(document.totalAmount ?? 0) >= 50000 ? 'high' : 'medium';
+
+        return {
+          id: document.id,
+          documentId: document.id,
+          type: 'SLA_ESCALATION',
+          severity,
+          vendor,
+          reviewer,
+          lane,
+          documentType: document.documentType ?? 'UNKNOWN',
+          status: document.status,
+          daysOpen: Number(ageDays.toFixed(1)),
+          detail: `${vendor} has had a ${lane.replace(/_REVIEW$/, '').toLowerCase()} review pending for ${Number(ageDays.toFixed(1))} days.`,
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+      .sort((left, right) => {
+        const severityWeight = { critical: 3, high: 2, medium: 1 } as const;
+        return severityWeight[right.severity] - severityWeight[left.severity] || right.daysOpen - left.daysOpen;
+      });
+  }
+
   async getReviewAnalytics(user: AuthUser, periodDays = 7) {
     const documents = await this.prisma.document.findMany({
       where: { organizationId: user.organizationId },
@@ -423,20 +813,21 @@ export class DocumentsService {
         detail: `Invoice ${entry.invoiceNumber} appears ${entry.count} times for ${entry.vendor}.`,
       }));
 
-    const vendorRiskMap = new Map<string, { count: number; highRiskCount: number; avgAmount: number }>();
+    const vendorRiskMap = new Map<string, { count: number; highRiskCount: number; avgAmount: number; maxAmount: number }>();
     for (const document of documents) {
       const vendorName = (document.vendorName ?? '').trim();
       if (!vendorName) {
         continue;
       }
 
-      const current = vendorRiskMap.get(vendorName) ?? { count: 0, highRiskCount: 0, avgAmount: 0 };
+      const current = vendorRiskMap.get(vendorName) ?? { count: 0, highRiskCount: 0, avgAmount: 0, maxAmount: 0 };
       const riskScore = this.getDocumentRiskScore(document);
       const amount = Number(document.totalAmount ?? 0);
       vendorRiskMap.set(vendorName, {
         count: current.count + 1,
         highRiskCount: current.highRiskCount + (riskScore >= 60 ? 1 : 0),
         avgAmount: current.avgAmount + amount,
+        maxAmount: Math.max(current.maxAmount, amount),
       });
     }
 
@@ -455,10 +846,27 @@ export class DocumentsService {
         detail: `${entry.highRiskCount} high-risk documents across ${entry.count} submissions for ${entry.vendor}.`,
       }));
 
-    const policyExceptions = [...duplicateInvoicePatterns, ...concentrationAlerts].sort((left, right) => {
+    const amountSpikeAlerts = [...vendorRiskMap.entries()]
+      .map(([vendor, metrics]) => ({
+        vendor,
+        count: metrics.count,
+        avgAmount: metrics.count ? metrics.avgAmount / metrics.count : 0,
+        maxAmount: metrics.maxAmount,
+      }))
+      .filter((entry) => entry.count >= 3 && entry.avgAmount > 0 && entry.maxAmount >= Math.max(10000, entry.avgAmount * 2))
+      .map((entry) => ({
+        type: 'Amount spike risk',
+        vendor: entry.vendor,
+        severity: 'high' as const,
+        detail: `An invoice spike for ${entry.vendor} reached ${entry.maxAmount.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })} versus an average of ${entry.avgAmount.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })}.`,
+      }));
+
+    const policyExceptions = [...duplicateInvoicePatterns, ...concentrationAlerts, ...amountSpikeAlerts].sort((left, right) => {
       const severityWeight = { high: 2, medium: 1 } as const;
       return severityWeight[right.severity] - severityWeight[left.severity];
     });
+
+    const escalations = await this.getEscalationSummary(user);
 
     const trendDates = Array.from({ length: Math.max(1, periodDays) }, (_, index) => {
       const date = new Date();
@@ -492,6 +900,7 @@ export class DocumentsService {
       vendorRisk,
       agingSummary,
       policyExceptions,
+      escalations,
       dailyTrend,
       statusBreakdown: documents.reduce<Record<string, number>>((accumulator, document) => {
         accumulator[document.status] = (accumulator[document.status] ?? 0) + 1;
@@ -508,6 +917,11 @@ export class DocumentsService {
   async exportReviewAnalytics(user: AuthUser, periodDays = 7) {
     const analytics = await this.getReviewAnalytics(user, periodDays);
 
+    const [vendorRiskProfiles, reviewerWorkload, notifications] = await Promise.all([
+      this.getVendorRiskProfiles(user),
+      this.getReviewerWorkload(user),
+      this.getNotifications(user),
+    ]);
     const rows = [
       ['periodDays', String(analytics.periodDays)],
       ['totalDocuments', String(analytics.totalDocuments)],
@@ -521,8 +935,12 @@ export class DocumentsService {
       ['reviewRequiredCount', String(analytics.agingSummary.reviewRequiredCount)],
       ['overdueCount', String(analytics.agingSummary.overdueCount)],
       ['policyExceptions', JSON.stringify(analytics.policyExceptions)],
+      ['escalations', JSON.stringify(analytics.escalations ?? [])],
       ['vendorRisk', JSON.stringify(analytics.vendorRisk)],
       ['dailyTrend', JSON.stringify(analytics.dailyTrend)],
+      ['vendorRiskProfiles', JSON.stringify(vendorRiskProfiles)],
+      ['reviewerWorkload', JSON.stringify(reviewerWorkload)],
+      ['unreadNotificationCount', String((notifications ?? []).filter((notification) => !notification.readAt).length)],
     ];
 
     const header = ['metric', 'value'];
@@ -533,7 +951,73 @@ export class DocumentsService {
     return csv;
   }
 
-  async processDocument(id: string, user: AuthUser) {
+  async enqueueDocumentProcessing(id: string, user: AuthUser) {
+    const document = await this.prisma.document.findFirst({ where: { id, organizationId: user.organizationId } });
+    if (!document) throw new NotFoundException('Document not found.');
+    if (!['UPLOADED', 'FAILED'].includes(document.status)) {
+      throw new BadRequestException('Only uploaded or failed documents can be queued for processing.');
+    }
+    if (!this.processingQueue) throw new ServiceUnavailableException('Document processing queue is unavailable.');
+
+    const existingJob = await this.prisma.processingJob.findFirst({
+      where: { organizationId: user.organizationId, documentId: id, status: { in: ['QUEUED', 'ACTIVE'] } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (existingJob) return existingJob;
+
+    const processingJob = await this.prisma.processingJob.create({
+      data: { organizationId: user.organizationId, documentId: id, status: 'QUEUED', currentStep: 'QUEUED', progress: 0 },
+    });
+    try {
+      await this.processingQueue.enqueue({ processingJobId: processingJob.id, documentId: id, user });
+      await this.prisma.auditLog.create({
+        data: {
+          organizationId: user.organizationId,
+          userId: user.id,
+          documentId: id,
+          action: 'PROCESSING_JOB_QUEUED',
+          metadata: { processingJobId: processingJob.id },
+        },
+      });
+      return processingJob;
+    } catch (error) {
+      await this.prisma.processingJob.update({
+        where: { id: processingJob.id },
+        data: { status: 'FAILED', currentStep: 'QUEUE_FAILED', error: 'Unable to enqueue processing job.', completedAt: new Date() },
+      });
+      throw error;
+    }
+  }
+
+  async getDocumentProcessingStatus(id: string, user: AuthUser) {
+    const document = await this.prisma.document.findFirst({ where: { id, organizationId: user.organizationId }, select: { id: true, status: true } });
+    if (!document) throw new NotFoundException('Document not found.');
+    const processingJob = await this.prisma.processingJob.findFirst({
+      where: { documentId: id, organizationId: user.organizationId },
+      orderBy: { createdAt: 'desc' },
+    });
+    return { documentId: id, documentStatus: document.status, processingJob };
+  }
+
+  private toInvoiceExtraction(fields: Record<string, { normalizedValue: string | null }>, requiresReview: boolean): InvoiceExtractionResult {
+    const fieldValue = (name: string) => fields[name]?.normalizedValue ?? '';
+    const parseDate = (value: string): Date | null => {
+      const date = value ? new Date(value) : null;
+      return !date || Number.isNaN(date.getTime()) ? null : date;
+    };
+    const total = Number(fieldValue('total'));
+    return {
+      vendorName: fieldValue('vendor_name'),
+      invoiceNumber: fieldValue('invoice_number'),
+      invoiceDate: parseDate(fieldValue('invoice_date')),
+      dueDate: parseDate(fieldValue('due_date')),
+      totalAmount: Number.isFinite(total) ? total : 0,
+      currency: fieldValue('currency') || 'USD',
+      requiresReview,
+    };
+  }
+
+  async processDocument(id: string, user: AuthUser, processingJobId?: string) {
     const document = await this.prisma.document.findFirst({
       where: { id, organizationId: user.organizationId },
     });
@@ -542,15 +1026,24 @@ export class DocumentsService {
       throw new NotFoundException('Document not found.');
     }
 
-    const documentType = document.documentType === 'UNKNOWN' ? this.detectDocumentType(document.filename) : document.documentType;
+    if (processingJobId) await this.updateProcessingProgress(processingJobId, 'TEXT_EXTRACTION', 20);
     const documentTextHint = await this.readDocumentTextHint(document.storagePath);
-    const extraction = documentType === 'INVOICE' ? this.extractInvoiceData(document.filename, documentTextHint) : null;
+    if (processingJobId) await this.updateProcessingProgress(processingJobId, 'CLASSIFICATION_AND_EXTRACTION', 55);
+    const pipelineResult = this.extractionPipeline.run(document.filename, documentTextHint, document.documentType);
+    const documentType = pipelineResult.documentType;
+    const extractedFields = pipelineResult.fields;
+    const extraction = documentType === 'INVOICE' ? this.toInvoiceExtraction(extractedFields, pipelineResult.missingRequiredFields.length > 0) : null;
     const validation = documentType === 'INVOICE' ? this.validateInvoice(extraction ?? { vendorName: '', invoiceNumber: '', totalAmount: 0, currency: 'USD' }) : { requiresReview: false, flags: [], riskScore: 0 };
+    const confidenceFlags = pipelineResult.missingRequiredFields.map((fieldName) => `Missing or low-confidence required field: ${fieldName}`);
+    if (documentType === 'UNKNOWN' || pipelineResult.classification.confidence < Number(process.env.FIELD_REVIEW_CONFIDENCE ?? 0.7)) {
+      confidenceFlags.push('Document classification confidence is too low for automatic routing');
+    }
     const complianceFlags = documentType === 'INVOICE' ? await this.detectDuplicateInvoiceFlags(user.organizationId, document.id, extraction?.vendorName ?? document.vendorName, extraction?.invoiceNumber ?? document.invoiceNumber) : [];
-    const combinedFlags = [...validation.flags, ...complianceFlags.filter((flag) => !validation.flags.includes(flag))];
-    const combinedRiskScore = Math.min(100, validation.riskScore + complianceFlags.length * 25);
+    const combinedFlags = [...new Set([...validation.flags, ...confidenceFlags, ...complianceFlags])];
+    if (processingJobId) await this.updateProcessingProgress(processingJobId, 'VALIDATION_AND_ROUTING', 85);
+    const combinedRiskScore = Math.min(100, validation.riskScore + complianceFlags.length * 25 + confidenceFlags.length * 10);
     const nextStatus = document.status === 'UPLOADED' ? 'PROCESSING' : document.status === 'PROCESSING' ? 'EXTRACTED' : document.status;
-    const reviewStatus = combinedFlags.length > 0 ? 'REVIEW_REQUIRED' : validation.requiresReview ? 'REVIEW_REQUIRED' : extraction?.requiresReview ? 'REVIEW_REQUIRED' : nextStatus;
+    const reviewStatus = combinedFlags.length > 0 || validation.requiresReview || extraction?.requiresReview ? 'REVIEW_REQUIRED' : nextStatus;
 
     const updatedDocument = await this.prisma.document.update({
       where: { id },
@@ -563,9 +1056,26 @@ export class DocumentsService {
         dueDate: extraction?.dueDate ?? document.dueDate ?? null,
         totalAmount: extraction?.totalAmount ?? document.totalAmount ?? null,
         currency: extraction?.currency ?? document.currency ?? 'USD',
-        extractedAt: extraction ? new Date() : document.extractedAt ?? null,
+        extractedAt: new Date(),
+        extractedText: documentTextHint || null,
       },
     });
+
+    await this.prisma.documentClassification.upsert({
+      where: { documentId: id },
+      create: { documentId: id, documentType, confidence: pipelineResult.classification.confidence, provider: this.extractionPipeline.providerName, rawOutput: { declaredType: document.documentType, inferredType: pipelineResult.classification.documentType } },
+      update: { documentType, confidence: pipelineResult.classification.confidence, provider: this.extractionPipeline.providerName, rawOutput: { declaredType: document.documentType, inferredType: pipelineResult.classification.documentType }, classifiedAt: new Date() },
+    });
+    await Promise.all(Object.entries(extractedFields).map(([fieldName, field]) => this.prisma.extractedField.upsert({
+      where: { documentId_fieldName: { documentId: id, fieldName } },
+      create: { documentId: id, fieldName, value: field.value, normalizedValue: field.normalizedValue, confidence: field.confidence, source: field.source },
+      update: { value: field.value, normalizedValue: field.normalizedValue, confidence: field.confidence, source: field.source },
+    })));
+    if (documentType === 'INVOICE' && this.prisma.fraudAssessment) {
+      const documents = await this.prisma.document.findMany({ where: { organizationId: user.organizationId, documentType: 'INVOICE' }, orderBy: { createdAt: 'asc' } });
+      const assessedDocument = documents.find((item) => item.id === id) ?? updatedDocument;
+      await this.assessFraudDocument(assessedDocument, documents);
+    }
 
     if (combinedFlags.length > 0) {
       await this.prisma.auditLog.create({
@@ -651,6 +1161,10 @@ export class DocumentsService {
         const runtimeDocument = document as typeof document & { riskScore?: number };
         const riskScore = typeof runtimeDocument.riskScore === 'number' ? runtimeDocument.riskScore : this.getDocumentRiskScore(document);
 
+        await this.prisma.reviewAssignment.updateMany({
+          where: { organizationId: user.organizationId, documentId: document.id, status: 'ACTIVE' },
+          data: { status: 'COMPLETED', completedAt: new Date() },
+        });
         await this.prisma.auditLog.create({
           data: {
             organizationId: user.organizationId,
@@ -707,6 +1221,11 @@ export class DocumentsService {
         reviewNote,
         reviewedAt: new Date(),
       },
+    });
+
+    await this.prisma.reviewAssignment.updateMany({
+      where: { organizationId: user.organizationId, documentId: id, status: 'ACTIVE' },
+      data: { status: 'COMPLETED', completedAt: new Date() },
     });
 
     await this.prisma.auditLog.create({
@@ -832,6 +1351,70 @@ export class DocumentsService {
     };
   }
 
+  private withReviewMetadata<T extends { id: string; documentType?: string | null; status?: string | null; totalAmount?: number | null; vendorName?: string | null }>(document: T) {
+    const baseRiskScore = this.getDocumentRiskScore(document as any);
+    const fraudScore = Number((document as any).fraudAssessment?.score ?? 0);
+    const riskScore = Math.min(100, Math.max(baseRiskScore, fraudScore));
+    const reviewLane = this.getRecommendedReviewLane(document as any, riskScore);
+
+    return {
+      ...document,
+      riskScore,
+      recommendedReviewLane: reviewLane,
+      recommendedReviewer: this.getRecommendedReviewer(document as any, riskScore),
+      assignedReviewerId: (document as any).assignedReviewerId ?? null,
+      assignedReviewer: (document as any).assignedReviewer ?? null,
+    };
+  }
+
+  private getRecommendedReviewLane(
+    document: Partial<{ documentType?: string | null; status?: string | null; totalAmount?: number | null; vendorName?: string | null }>,
+    riskScore: number,
+  ): string {
+    if (document.documentType === 'BANK_STATEMENT' || /bank statement|statement/i.test(String(document.documentType ?? ''))) {
+      return 'BANKING_REVIEW';
+    }
+
+    if (document.documentType === 'KYC' || /kyc|identity/i.test(String(document.documentType ?? ''))) {
+      return 'KYC_REVIEW';
+    }
+
+    if (document.documentType === 'INVOICE' || Number(document.totalAmount ?? 0) >= 50000 || riskScore >= 60) {
+      return 'FINANCE_REVIEW';
+    }
+
+    if (document.documentType === 'COMPLIANCE_REPORT' || riskScore >= 70) {
+      return 'COMPLIANCE_REVIEW';
+    }
+
+    return 'GENERAL_REVIEW';
+  }
+
+  private getRecommendedReviewer(
+    document: Partial<{ documentType?: string | null; status?: string | null; totalAmount?: number | null; vendorName?: string | null }>,
+    riskScore: number,
+  ): string {
+    const lane = this.getRecommendedReviewLane(document, riskScore);
+
+    if (lane === 'BANKING_REVIEW') {
+      return 'Nina Patel';
+    }
+
+    if (lane === 'KYC_REVIEW') {
+      return 'Alicia Gomez';
+    }
+
+    if (lane === 'COMPLIANCE_REVIEW') {
+      return 'Daniel Brooks';
+    }
+
+    if (lane === 'FINANCE_REVIEW') {
+      return 'Maya Chen';
+    }
+
+    return 'Operations Desk';
+  }
+
   private async detectDuplicateInvoiceFlags(
     organizationId: string,
     documentId: string,
@@ -868,10 +1451,12 @@ export class DocumentsService {
           candidateVendor &&
           (candidateVendor === normalizedVendor ||
             candidateVendor.startsWith(normalizedVendor) ||
-            normalizedVendor.startsWith(candidateVendor))
+            normalizedVendor.startsWith(candidateVendor) ||
+            candidateVendor.includes(normalizedVendor) ||
+            normalizedVendor.includes(candidateVendor))
         );
 
-        if (isSameVendor) {
+        if (!normalizedVendor || !candidateVendor || isSameVendor) {
           return 'Duplicate invoice detected for the same vendor';
         }
 
@@ -920,24 +1505,102 @@ export class DocumentsService {
 
   private async extractImageTextWithOcr(filePath: string): Promise<string> {
     const binaryCandidates = [process.env.TESSERACT_PATH?.trim(), 'tesseract'].filter(Boolean) as string[];
+    const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'ledgerflow-ocr-'));
 
-    for (const binary of binaryCandidates) {
-      try {
-        const output = execFileSync(binary, [filePath, 'stdout', '--psm', '6'], {
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
+    try {
+      const isPdf = path.extname(filePath).toLowerCase() === '.pdf';
+      let pagePaths = [filePath];
 
-        const cleaned = String(output ?? '').replace(/\s+/g, ' ').trim();
-        if (cleaned) {
-          return cleaned;
+      // Render a bounded number of pages at print resolution; Tesseract expects images.
+      if (isPdf) {
+        const renderedPrefix = path.join(temporaryDirectory, 'page');
+        const renderers = [process.env.PDFTOPPM_PATH?.trim(), 'pdftoppm'].filter(Boolean) as string[];
+        let rendered = false;
+        for (const binary of renderers) {
+          try {
+            await this.runOcrCommand(binary, ['-f', '1', '-l', process.env.OCR_PDF_MAX_PAGES?.trim() || '10', '-r', process.env.OCR_PDF_DPI?.trim() || '300', '-png', filePath, renderedPrefix], {
+              stdio: ['ignore', 'ignore', 'pipe'], timeout: 60_000, maxBuffer: 10 * 1024 * 1024,
+            });
+            rendered = true;
+            break;
+          } catch {
+            // Try another configured/local renderer.
+          }
         }
+        if (!rendered) return '';
+        pagePaths = (await fs.readdir(temporaryDirectory))
+          .filter((name) => /^page-\d+\.png$/i.test(name))
+          .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+          .map((name) => path.join(temporaryDirectory, name));
+      }
+
+      const extractedPages: string[] = [];
+      for (let pageIndex = 0; pageIndex < pagePaths.length; pageIndex += 1) {
+        const sourcePath = pagePaths[pageIndex];
+        if (!sourcePath) continue;
+        const enhancedPath = process.env.OCR_PREPROCESSING_ENABLED === 'false'
+          ? null
+          : await this.preprocessOcrImage(sourcePath, temporaryDirectory, pageIndex);
+        const ocrInputs = enhancedPath ? [enhancedPath, sourcePath] : [sourcePath];
+        let bestText = '';
+
+        for (const imagePath of ocrInputs) {
+          for (const psm of ['6', '11']) {
+            for (const binary of binaryCandidates) {
+              try {
+                const output = await this.runOcrCommand(binary, [imagePath, 'stdout', '--oem', process.env.TESSERACT_OEM?.trim() || '1', '--psm', psm, '-l', process.env.TESSERACT_LANGUAGES?.trim() || 'eng'], {
+                  encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, maxBuffer: 5 * 1024 * 1024,
+                });
+                const cleaned = String(output ?? '').replace(/\s+/g, ' ').trim();
+                if (this.countOcrCharacters(cleaned) > this.countOcrCharacters(bestText)) bestText = cleaned;
+              } catch {
+                // Try a different segmentation mode or configured Tesseract binary.
+              }
+            }
+          }
+        }
+        if (bestText) extractedPages.push(bestText);
+      }
+      return extractedPages.join('\n').slice(0, 20000);
+    } finally {
+      await fs.rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private async preprocessOcrImage(filePath: string, temporaryDirectory: string, pageIndex: number): Promise<string | null> {
+    const outputPath = path.join(temporaryDirectory, `enhanced-${pageIndex}.png`);
+    const processors = [process.env.OCR_IMAGE_PROCESSOR_PATH?.trim(), 'magick', 'convert'].filter(Boolean) as string[];
+    const adjustments = ['-colorspace', 'Gray', '-deskew', '40%', '-normalize', '-contrast-stretch', '1%x1%', '-sharpen', '0x1'];
+
+    for (const binary of processors) {
+      try {
+        const args = path.basename(binary).toLowerCase() === 'magick'
+          ? ['convert', filePath, ...adjustments, outputPath]
+          : [filePath, ...adjustments, outputPath];
+        await this.runOcrCommand(binary, args, { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30_000, maxBuffer: 5 * 1024 * 1024 });
+        return outputPath;
       } catch {
-        continue;
+        // ImageMagick is optional; continue with the original image if unavailable.
       }
     }
+    return null;
+  }
 
-    return '';
+  private runOcrCommand(binary: string, args: string[], options: any): Promise<string | Buffer> {
+    return new Promise((resolve, reject) => {
+      execFile(binary, args, options, (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      });
+    });
+  }
+
+  private async updateProcessingProgress(processingJobId: string, currentStep: string, progress: number): Promise<void> {
+    await this.prisma.processingJob.update({ where: { id: processingJobId }, data: { currentStep, progress } });
+  }
+
+  private countOcrCharacters(value: string): number {
+    return (value.match(/[\p{L}\p{N}]/gu) ?? []).length;
   }
 
   private extractPdfText(buffer: Buffer): string {
@@ -1259,6 +1922,25 @@ export class DocumentsService {
     if (normalized.includes('compliance') || normalized.includes('report')) return 'COMPLIANCE_REPORT';
 
     return 'UNKNOWN';
+  }
+
+  private detectDocumentTypeFromContent(contentHint: string, filename: string): 'INVOICE' | 'BANK_STATEMENT' | 'KYC' | 'COMPLIANCE_REPORT' | 'UNKNOWN' {
+    const normalized = `${contentHint} ${filename}`.toLowerCase();
+
+    if (/(invoice|bill|payment due|amount due|vendor)/i.test(normalized)) {
+      return 'INVOICE';
+    }
+    if (/(bank(?:\s+of\s+america)?\s+statement|account summary|transaction history|balance as of|ending in \d{4}|statement\s+account)/i.test(normalized)) {
+      return 'BANK_STATEMENT';
+    }
+    if (/(kyc|know your customer|identity verification|passport|driver license|address verification)/i.test(normalized)) {
+      return 'KYC';
+    }
+    if (/(compliance report|policy review|risk assessment|audit report|regulatory review)/i.test(normalized)) {
+      return 'COMPLIANCE_REPORT';
+    }
+
+    return this.detectDocumentType(filename);
   }
 
   private safeFilename(filename: string): string {

@@ -37,9 +37,13 @@ model Organization {
   name      String
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
-  users     User[]
-  documents Document[]
-  auditLogs AuditLog[]
+  users       User[]
+  documents   Document[]
+  auditLogs   AuditLog[]
+  assignments   ReviewAssignment[]
+  notifications      Notification[]
+  vendorRiskProfiles VendorRiskProfile[]
+  processingJobs     ProcessingJob[]
 }
 
 model User {
@@ -52,7 +56,10 @@ model User {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  auditLogs      AuditLog[]
+  auditLogs           AuditLog[]
+  assignedDocuments  Document[] @relation("AssignedReviewer")
+  assignments        ReviewAssignment[] @relation("AssignmentReviewer")
+  notifications      Notification[]
 
   @@index([organizationId])
 }
@@ -73,15 +80,155 @@ model Document {
   totalAmount    Float?
   currency       String?        @default("USD")
   extractedAt    DateTime?
+  extractedText String? @db.Text
   reviewNote     String?
   reviewedAt     DateTime?
+  assignedReviewerId String?
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   auditLogs      AuditLog[]
+  assignedReviewer User? @relation("AssignedReviewer", fields: [assignedReviewerId], references: [id], onDelete: SetNull)
+  reviewAssignments ReviewAssignment[]
+  notifications     Notification[]
+  processingJobs   ProcessingJob[]
+  classification   DocumentClassification?
+  extractedFields  ExtractedField[]
+  fraudAssessment  FraudAssessment?
 
   @@index([organizationId, createdAt])
+  @@index([organizationId, assignedReviewerId, status])
   @@index([status])
+}
+
+model DocumentClassification {
+  id             String       @id @default(cuid())
+  documentId     String       @unique
+  documentType   DocumentType
+  confidence     Float
+  provider       String
+  rawOutput      Json?
+  classifiedAt   DateTime     @default(now())
+  document       Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+}
+
+model ExtractedField {
+  id              String   @id @default(cuid())
+  documentId      String
+  fieldName       String
+  value           String?
+  normalizedValue String?
+  confidence      Float    @default(0)
+  source          String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  document        Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, fieldName])
+  @@index([documentId, confidence])
+}
+
+model FraudAssessment {
+  id           String   @id @default(cuid())
+  documentId   String   @unique
+  score        Int      @default(0)
+  signals      Json?
+  assessedAt   DateTime @default(now())
+  document     Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([score, assessedAt])
+}
+
+enum ProcessingJobStatus {
+  QUEUED
+  ACTIVE
+  COMPLETED
+  FAILED
+}
+
+enum ReviewAssignmentStatus {
+  ACTIVE
+  COMPLETED
+  REASSIGNED
+}
+
+model ProcessingJob {
+  id             String             @id @default(cuid())
+  organizationId String
+  documentId     String
+  status         ProcessingJobStatus @default(QUEUED)
+  currentStep    String              @default("QUEUED")
+  progress       Int                 @default(0)
+  error          String?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  document       Document            @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status, createdAt])
+  @@index([documentId, createdAt])
+}
+
+model ReviewAssignment {
+  id             String                  @id @default(cuid())
+  organizationId String
+  documentId     String
+  reviewerId     String
+  assignedById   String?
+  status         ReviewAssignmentStatus  @default(ACTIVE)
+  assignedAt     DateTime                @default(now())
+  completedAt    DateTime?
+  organization   Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  document       Document                @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  reviewer       User                    @relation("AssignmentReviewer", fields: [reviewerId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status, assignedAt])
+  @@index([reviewerId, status])
+  @@index([documentId, assignedAt])
+}
+
+model VendorRiskProfile {
+  id                    String       @id @default(cuid())
+  organizationId        String
+  vendorKey             String
+  vendorName            String
+  currency              String       @default("USD")
+  score                 Int          @default(0)
+  documentCount         Int          @default(0)
+  highRiskCount         Int          @default(0)
+  duplicateInvoiceCount Int          @default(0)
+  averageInvoiceAmount  Float?
+  signals               Json?
+  evaluatedAt           DateTime     @default(now())
+  organization          Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, vendorKey])
+  @@index([organizationId, score])
+}
+
+model Notification {
+  id             String       @id @default(cuid())
+  organizationId String
+  userId         String
+  documentId     String?
+  eventKey       String
+  type           String
+  severity       String
+  title          String
+  message        String
+  readAt         DateTime?
+  resolvedAt     DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document       Document?    @relation(fields: [documentId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, eventKey])
+  @@index([organizationId, resolvedAt, createdAt])
+  @@index([userId, readAt, resolvedAt])
 }
 
 model AuditLog {

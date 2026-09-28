@@ -16,8 +16,20 @@ type DocumentRecord = {
   summary?: string;
   validationFlags?: string[];
   riskScore?: number;
+  recommendedReviewLane?: string;
+  recommendedReviewer?: string;
+  assignedReviewerId?: string | null;
+  assignedReviewer?: { id: string; name: string; email: string } | null;
+  extractedText?: string | null;
+  extractedFields?: Array<{ id: string; fieldName: string; value: string | null; normalizedValue: string | null; confidence: number; source: string }>;
+  classification?: { documentType: string; confidence: number; provider: string } | null;
+  fraudAssessment?: { score: number; assessedAt: string; signals: Array<{ code: string; severity: string; weight: number; detail: string }> | null } | null;
   reviewNote?: string | null;
 };
+
+type ReviewerWorkload = { id: string; name: string; email: string; activeAssignments: number };
+type OperationalNotification = { id: string; title: string; message: string; severity: string; readAt: string | null; createdAt: string };
+type VendorRiskProfile = { id: string; vendorName: string; currency: string; score: number; documentCount: number; highRiskCount: number; duplicateInvoiceCount: number; averageInvoiceAmount: number | null; signals: string[]; evaluatedAt: string };
 
 type DashboardSummary = {
   totalDocuments: number;
@@ -27,6 +39,20 @@ type DashboardSummary = {
   approvalRate: number;
   statusBreakdown: Record<string, number>;
   typeBreakdown: Record<string, number>;
+};
+
+type EscalationAlert = {
+  id: string;
+  documentId: string;
+  type: 'SLA_ESCALATION';
+  severity: 'medium' | 'high' | 'critical';
+  vendor: string;
+  reviewer: string;
+  lane: string;
+  documentType: string;
+  status: string;
+  daysOpen: number;
+  detail: string;
 };
 
 type ReviewAnalytics = {
@@ -53,6 +79,7 @@ type ReviewAnalytics = {
     severity: 'low' | 'medium' | 'high';
     detail: string;
   }>;
+  escalations?: EscalationAlert[];
   dailyTrend: Array<{ date: string; total: number; approved: number; review: number }>;
   statusBreakdown: Record<string, number>;
   typeBreakdown: Record<string, number>;
@@ -90,6 +117,9 @@ function App(): JSX.Element {
     typeBreakdown: {},
   });
   const [reviewAnalytics, setReviewAnalytics] = useState<ReviewAnalytics | null>(null);
+  const [reviewerWorkload, setReviewerWorkload] = useState<ReviewerWorkload[]>([]);
+  const [notifications, setNotifications] = useState<OperationalNotification[]>([]);
+  const [vendorRiskProfiles, setVendorRiskProfiles] = useState<VendorRiskProfile[]>([]);
 
   const getPriorityScore = (doc: DocumentRecord): number => {
     let riskScore = 0;
@@ -128,6 +158,8 @@ function App(): JSX.Element {
     const fields = [
       `Document: ${doc.filename}`,
       `Type: ${doc.documentType}`,
+      `Recommended review lane: ${doc.recommendedReviewLane || 'GENERAL_REVIEW'}`,
+      `Recommended reviewer: ${doc.recommendedReviewer || 'Operations Desk'}`,
       `Status: ${doc.status}`,
       `Vendor: ${doc.vendorName || 'Not extracted'}`,
       `Invoice number: ${doc.invoiceNumber || 'Not extracted'}`,
@@ -217,6 +249,61 @@ function App(): JSX.Element {
     if (response.ok) {
       const data = (await response.json()) as ReviewAnalytics;
       setReviewAnalytics(data);
+    }
+  }
+
+  async function loadReviewerWorkload(): Promise<void> {
+    if (!token) return;
+    const response = await fetch('http://localhost:3001/api/documents/reviewer-workload', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (response.ok) setReviewerWorkload((await response.json()) as ReviewerWorkload[]);
+  }
+
+  async function refreshOperationalInsights(): Promise<void> {
+    if (!token) return;
+    await Promise.all([
+      fetch('http://localhost:3001/api/documents/escalations/evaluate', { method: 'POST', headers: { Authorization: `Bearer ${token}` } }),
+      fetch('http://localhost:3001/api/documents/vendor-risk/recalculate', { method: 'POST', headers: { Authorization: `Bearer ${token}` } }),
+      fetch('http://localhost:3001/api/documents/fraud-assessments/recalculate', { method: 'POST', headers: { Authorization: `Bearer ${token}` } }),
+    ]);
+    await Promise.all([loadNotifications(), loadVendorRiskProfiles(), loadReviewerWorkload()]);
+  }
+
+  async function loadNotifications(): Promise<void> {
+    if (!token) return;
+    const response = await fetch('http://localhost:3001/api/documents/notifications', { headers: { Authorization: `Bearer ${token}` } });
+    if (response.ok) setNotifications((await response.json()) as OperationalNotification[]);
+  }
+
+  async function loadVendorRiskProfiles(): Promise<void> {
+    if (!token) return;
+    const response = await fetch('http://localhost:3001/api/documents/vendor-risk', { headers: { Authorization: `Bearer ${token}` } });
+    if (response.ok) setVendorRiskProfiles((await response.json()) as VendorRiskProfile[]);
+  }
+
+  async function markNotificationRead(notificationId: string): Promise<void> {
+    if (!token) return;
+    const response = await fetch(`http://localhost:3001/api/documents/notifications/${notificationId}/read`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}` },
+    });
+    if (response.ok) await loadNotifications();
+  }
+
+  async function loadEscalations(): Promise<void> {
+    if (!token) {
+      return;
+    }
+
+    const response = await fetch('http://localhost:3001/api/documents/escalations', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (response.ok) {
+      const data = (await response.json()) as EscalationAlert[];
+      setReviewAnalytics((current) => (current ? { ...current, escalations: data } : current));
     }
   }
 
@@ -531,16 +618,53 @@ function App(): JSX.Element {
         },
       });
 
-      const data = (await response.json()) as { message?: string; status?: string };
-      if (!response.ok) {
-        throw new Error(data.message || 'Unable to process this document.');
+      const data = (await response.json()) as { message?: string; id?: string; status?: string };
+      if (!response.ok || !data.id) {
+        throw new Error(data.message || 'Unable to queue this document.');
       }
 
-      setStatus(`Document moved to ${data.status || 'processing'} status.`);
-      await Promise.all([loadDocuments(), loadDashboardSummary()]);
+      setStatus('Document queued for processing.');
+      let finished = false;
+      for (let attempt = 0; attempt < 90; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        const statusResponse = await fetch(`http://localhost:3001/api/documents/${documentId}/status`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!statusResponse.ok) break;
+        const statusData = (await statusResponse.json()) as { documentStatus: string; processingJob?: { status: string; currentStep: string; progress: number; error?: string | null } };
+        const job = statusData.processingJob;
+        if (job) setStatus(`Processing · ${job.currentStep.replace(/_/g, ' ').toLowerCase()} · ${job.progress}%`);
+        if (job?.status === 'COMPLETED') {
+          setStatus(`Document processed: ${statusData.documentStatus.toLowerCase().replace(/_/g, ' ')}.`);
+          finished = true;
+          break;
+        }
+        if (job?.status === 'FAILED') {
+          throw new Error(job.error || 'Document processing failed.');
+        }
+      }
+      if (!finished) setStatus('Processing is still running. The queue will continue in the background.');
+      await Promise.all([loadDocuments(), loadDashboardSummary(), loadReviewAnalytics()]);
     } catch (error) {
       const messageText = error instanceof Error ? error.message : 'Processing failed.';
       setStatus(messageText);
+    }
+  }
+
+  async function handleAssignLeastLoadedReviewer(documentId: string): Promise<void> {
+    if (!token) return;
+    try {
+      const response = await fetch(`http://localhost:3001/api/documents/${documentId}/assign`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = (await response.json()) as { message?: string; assignedReviewer?: { name: string } };
+      if (!response.ok) throw new Error(data.message || 'Unable to assign this document.');
+      setStatus(`Assigned to ${data.assignedReviewer?.name ?? 'reviewer'}.`);
+      await Promise.all([loadDocuments(), loadReviewerWorkload()]);
+      if (selectedDocumentId === documentId) await loadDocumentSummary(documentId);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Unable to assign this document.');
     }
   }
 
@@ -633,7 +757,7 @@ function App(): JSX.Element {
       return;
     }
 
-    void Promise.all([loadDashboardSummary(), loadReviewAnalytics()]);
+    void Promise.all([loadDashboardSummary(), loadReviewAnalytics(), loadEscalations(), refreshOperationalInsights()]);
   }, [token, documents.length]);
 
   useEffect(() => {
@@ -699,6 +823,50 @@ function App(): JSX.Element {
               </div>
             )}
           </div>
+          <div className="detail-grid" style={{ marginTop: '18px', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+            {reviewerWorkload.length ? reviewerWorkload.map((reviewer) => (
+              <div key={reviewer.id}>
+                <span className="meta-label">{reviewer.name}</span>
+                <strong>{reviewer.activeAssignments} active assignments</strong>
+              </div>
+            )) : <span className="meta-label">No reviewers configured</span>}
+          </div>
+        </section>
+
+        <section className="panel-box" aria-label="Escalation notifications">
+          <div className="panel-header">
+            <p className="eyebrow accent">INBOX · {notifications.filter((notification) => !notification.readAt).length} unread</p>
+            <h3>Escalation notifications</h3>
+          </div>
+          {notifications.length ? (
+            <ul className="document-list">
+              {notifications.slice(0, 5).map((notification) => (
+                <li key={notification.id}>
+                  <div><strong>{notification.title}</strong><span>{notification.message}</span></div>
+                  <div className="document-meta"><small>{notification.severity}</small><small>{new Date(notification.createdAt).toLocaleString()}</small></div>
+                  {!notification.readAt ? <button type="button" className="secondary-button compact-button" onClick={() => void markNotificationRead(notification.id)}>Mark read</button> : null}
+                </li>
+              ))}
+            </ul>
+          ) : <div className="empty-state"><p>No active escalation notifications.</p></div>}
+        </section>
+
+        <section className="panel-box" aria-label="Vendor anomaly scores">
+          <div className="panel-header">
+            <p className="eyebrow accent">VENDOR MONITORING</p>
+            <h3>Vendor anomaly scores</h3>
+          </div>
+          {vendorRiskProfiles.length ? (
+            <div className="detail-grid" style={{ marginTop: '12px', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+              {vendorRiskProfiles.slice(0, 6).map((profile) => (
+                <div key={profile.id}>
+                  <span className="meta-label">{profile.vendorName} · {profile.currency}</span>
+                  <strong>{profile.score}/100 risk · {profile.documentCount} documents</strong>
+                  <small>{profile.signals.length ? profile.signals.join(' · ') : 'No anomaly signals'}</small>
+                </div>
+              ))}
+            </div>
+          ) : <div className="empty-state"><p>Vendor risk scores will appear after documents are processed.</p></div>}
         </section>
 
         {reviewAnalytics ? (
@@ -729,7 +897,7 @@ function App(): JSX.Element {
               </div>
             </div>
 
-            <div style={{ marginTop: '18px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px' }}>
+                  <div style={{ marginTop: '18px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px' }}>
               <div>
                 <span className="meta-label">Top vendor risk</span>
                 <ul style={{ margin: '8px 0 0', paddingLeft: '18px' }}>
@@ -747,6 +915,17 @@ function App(): JSX.Element {
                       <strong>{entry.vendor}</strong> · {entry.type} ({entry.severity})
                     </li>
                   )) : <li>No policy exceptions</li>}
+                </ul>
+              </div>
+
+              <div>
+                <span className="meta-label">Escalations</span>
+                <ul style={{ margin: '8px 0 0', paddingLeft: '18px' }}>
+                  {reviewAnalytics.escalations?.length ? reviewAnalytics.escalations.slice(0, 3).map((entry) => (
+                    <li key={entry.id}>
+                      <strong>{entry.vendor}</strong> · {entry.severity} ({entry.reviewer})
+                    </li>
+                  )) : <li>No active escalations</li>}
                 </ul>
               </div>
 
@@ -839,9 +1018,9 @@ function App(): JSX.Element {
                       <small>{doc.status}</small>
                       <small>{Math.round(doc.size / 1024)} KB</small>
                     </div>
-                    {doc.status === 'UPLOADED' ? (
+                    {doc.status === 'UPLOADED' || doc.status === 'FAILED' ? (
                       <button type="button" className="secondary-button compact-button" onClick={() => void handleProcessDocument(doc.id)}>
-                        Process
+                        {doc.status === 'FAILED' ? 'Retry' : 'Process'}
                       </button>
                     ) : null}
                     {doc.status !== 'UPLOADED' && doc.status !== 'APPROVED' && doc.status !== 'REJECTED' ? (
@@ -950,6 +1129,8 @@ function App(): JSX.Element {
                   </div>
                   <div className="document-meta">
                     <small>{doc.status}</small>
+                    <small>{doc.recommendedReviewLane || 'GENERAL_REVIEW'}</small>
+                    <small>{doc.recommendedReviewer || 'Operations Desk'}</small>
                     <small>{doc.riskScore >= 60 ? 'High risk' : doc.riskScore >= 30 ? 'Medium risk' : 'Low risk'}</small>
                     <small>{Math.round(doc.size / 1024)} KB</small>
                   </div>
@@ -974,6 +1155,18 @@ function App(): JSX.Element {
               <div>
                 <span className="meta-label">Status</span>
                 <strong>{selectedDocumentDetails.status}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Recommended lane</span>
+                <strong>{selectedDocumentDetails.recommendedReviewLane || 'GENERAL_REVIEW'}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Recommended reviewer</span>
+                <strong>{selectedDocumentDetails.recommendedReviewer || 'Operations Desk'}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Assigned reviewer</span>
+                <strong>{selectedDocumentDetails.assignedReviewer?.name ?? 'Unassigned'}</strong>
               </div>
               <div>
                 <span className="meta-label">Type</span>
@@ -1012,6 +1205,42 @@ function App(): JSX.Element {
 
           {selectedDocumentSummary ? <p className="detail-summary">{selectedDocumentSummary}</p> : null}
 
+          {selectedDocumentDetails?.classification ? (
+            <p className="detail-summary">Classification confidence: {(selectedDocumentDetails.classification.confidence * 100).toFixed(0)}% · {selectedDocumentDetails.classification.provider}</p>
+          ) : null}
+          {selectedDocumentDetails?.fraudAssessment ? (
+            <div style={{ marginTop: '14px' }}>
+              <span className="meta-label">Fraud assessment · {selectedDocumentDetails.fraudAssessment.score}/100</span>
+              {selectedDocumentDetails.fraudAssessment.signals?.length ? (
+                <ul style={{ margin: '8px 0 0', paddingLeft: '18px', color: '#fbbf24' }}>
+                  {(selectedDocumentDetails.fraudAssessment.signals ?? []).map((signal) => (
+                    <li key={signal.code}><strong>{signal.code.replace(/_/g, ' ')}</strong>: {signal.detail}</li>
+                  ))}
+                </ul>
+              ) : <small>No fraud signals detected in current available history.</small>}
+            </div>
+          ) : null}
+          {selectedDocumentDetails?.extractedFields?.length ? (
+            <div style={{ marginTop: '16px' }}>
+              <span className="meta-label">Extracted fields</span>
+              <div className="detail-grid" style={{ marginTop: '8px', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))' }}>
+                {selectedDocumentDetails.extractedFields.map((field) => (
+                  <div key={field.id}>
+                    <span className="meta-label">{field.fieldName.replace(/_/g, ' ')}</span>
+                    <strong>{field.normalizedValue ?? 'Not found'}</strong>
+                    <small>{Math.round(field.confidence * 100)}% confidence · {field.source}</small>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {selectedDocumentDetails?.extractedText ? (
+            <details style={{ marginTop: '14px' }}>
+              <summary>OCR text</summary>
+              <pre style={{ whiteSpace: 'pre-wrap', maxHeight: '280px', overflow: 'auto' }}>{selectedDocumentDetails.extractedText}</pre>
+            </details>
+          ) : null}
+
           {selectedDocumentDetails ? (
             <div style={{ marginTop: '18px' }}>
               <label style={{ display: 'block', marginBottom: '8px' }}>
@@ -1026,6 +1255,11 @@ function App(): JSX.Element {
               </label>
 
               <div className="review-actions" style={{ marginTop: '12px' }}>
+                {['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'].includes(selectedDocumentDetails.status) ? (
+                  <button type="button" className="secondary-button compact-button" onClick={() => void handleAssignLeastLoadedReviewer(selectedDocumentDetails.id)}>
+                    {selectedDocumentDetails.assignedReviewer ? 'Rebalance reviewer' : 'Assign least-loaded reviewer'}
+                  </button>
+                ) : null}
                 <button type="button" className="secondary-button compact-button" onClick={() => void handleReviewDocument(selectedDocumentDetails.id, 'APPROVED')}>
                   Approve
                 </button>

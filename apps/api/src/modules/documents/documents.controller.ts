@@ -4,6 +4,8 @@ import {
   Controller,
   Get,
   Header,
+  HttpCode,
+  HttpStatus,
   Inject,
   Param,
   Post,
@@ -78,12 +80,12 @@ export class DocumentsController {
     @Query('limit') limit?: string,
   ) {
     return this.documentsService.getReviewQueue(user, {
-      status: status || undefined,
-      documentType: documentType || undefined,
+      ...(status ? { status } : {}),
+      ...(documentType ? { documentType } : {}),
       onlyHighRisk: onlyHighRisk === 'true' || onlyHighRisk === '1',
-      search: search || undefined,
-      page: page ? Number(page) : undefined,
-      limit: limit ? Number(limit) : undefined,
+      ...(search ? { search } : {}),
+      ...(page ? { page: Number(page) } : {}),
+      ...(limit ? { limit: Number(limit) } : {}),
     });
   }
 
@@ -100,11 +102,60 @@ export class DocumentsController {
     @Query('search') search?: string,
   ) {
     return this.documentsService.exportReviewQueue(user, {
-      status: status || undefined,
-      documentType: documentType || undefined,
+      ...(status ? { status } : {}),
+      ...(documentType ? { documentType } : {}),
       onlyHighRisk: onlyHighRisk === 'true' || onlyHighRisk === '1',
-      search: search || undefined,
+      ...(search ? { search } : {}),
     });
+  }
+
+  @Get('vendor-risk')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async getVendorRiskProfiles(@CurrentUser() user: AuthUser) {
+    return this.documentsService.getVendorRiskProfiles(user);
+  }
+
+  @Post('vendor-risk/recalculate')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async recalculateVendorRiskProfiles(@CurrentUser() user: AuthUser) {
+    return this.documentsService.recalculateVendorRiskProfiles(user);
+  }
+
+  @Post('fraud-assessments/recalculate')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async recalculateFraudAssessments(@CurrentUser() user: AuthUser) {
+    return this.documentsService.recalculateFraudAssessments(user);
+  }
+
+  @Post('escalations/evaluate')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async evaluateEscalations(@CurrentUser() user: AuthUser) {
+    return this.documentsService.evaluateEscalations(user);
+  }
+
+  @Get('notifications')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async getNotifications(@CurrentUser() user: AuthUser) {
+    return this.documentsService.getNotifications(user);
+  }
+
+  @Post('notifications/:id/read')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async markNotificationRead(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentsService.markNotificationRead(id, user);
+  }
+
+  @Get('reviewer-workload')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async getReviewerWorkload(@CurrentUser() user: AuthUser) {
+    return this.documentsService.getReviewerWorkload(user);
   }
 
   @Get('dashboard')
@@ -121,6 +172,13 @@ export class DocumentsController {
     return this.documentsService.getReviewAnalytics(user, days ? Number(days) : 7);
   }
 
+  @Get('escalations')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async getEscalations(@CurrentUser() user: AuthUser) {
+    return this.documentsService.getEscalationSummary(user);
+  }
+
   @Get('analytics/export')
   @Header('Content-Type', 'text/csv; charset=utf-8')
   @Header('Content-Disposition', 'attachment; filename="review-analytics.csv"')
@@ -130,11 +188,39 @@ export class DocumentsController {
     return this.documentsService.exportReviewAnalytics(user, days ? Number(days) : 7);
   }
 
+  @Get(':id/status')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async getDocumentProcessingStatus(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentsService.getDocumentProcessingStatus(id, user);
+  }
+
   @Get(':id')
   @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
   @UseGuards(RolesGuard)
   async findOne(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.documentsService.findOne(id, user);
+  }
+
+  @Get(':id/extracted-fields')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async getExtractedFields(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentsService.getExtractedFields(id, user);
+  }
+
+  @Get(':id/classification')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async getDocumentClassification(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentsService.getDocumentClassification(id, user);
+  }
+
+  @Get(':id/fraud-assessment')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async getFraudAssessment(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentsService.getFraudAssessment(id, user);
   }
 
   @Get(':id/summary')
@@ -160,11 +246,19 @@ export class DocumentsController {
     return this.documentsService.exportDocumentAuditTrail(id, user);
   }
 
+  @Post(':id/assign')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async assignReviewer(@Param('id') id: string, @Body('reviewerId') reviewerId: string | undefined, @CurrentUser() user: AuthUser) {
+    return this.documentsService.assignReviewer(id, user, reviewerId);
+  }
+
   @Post(':id/process')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
   @UseGuards(RolesGuard)
   async processDocument(@Param('id') id: string, @CurrentUser() user: AuthUser) {
-    return this.documentsService.processDocument(id, user);
+    return this.documentsService.enqueueDocumentProcessing(id, user);
   }
 
   @Post('bulk-review')

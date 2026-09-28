@@ -14,6 +14,13 @@ describe('DocumentsService', () => {
       update: jest.fn(),
       updateMany: jest.fn(),
     },
+    user: { findMany: jest.fn() },
+    reviewAssignment: { findMany: jest.fn(), create: jest.fn(), updateMany: jest.fn() },
+    notification: { findUnique: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+    vendorRiskProfile: { upsert: jest.fn(), findMany: jest.fn() },
+    processingJob: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
+    documentClassification: { upsert: jest.fn() },
+    extractedField: { upsert: jest.fn(), findMany: jest.fn() },
     auditLog: {
       create: jest.fn(),
       findMany: jest.fn(),
@@ -28,6 +35,91 @@ describe('DocumentsService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  it('persists a processing job and queues it for background execution', async () => {
+    const queueMock = { enqueue: jest.fn().mockResolvedValue(undefined) };
+    const queuedService = new DocumentsService(prismaMock, storageMock, queueMock as any);
+    prismaMock.document.findFirst.mockResolvedValue({ id: 'queue-doc-1', organizationId: 'org-1', status: 'UPLOADED' });
+    prismaMock.processingJob.findFirst.mockResolvedValue(null);
+    prismaMock.processingJob.create.mockResolvedValue({ id: 'queue-job-1', status: 'QUEUED', progress: 0 });
+
+    const result = await queuedService.enqueueDocumentProcessing('queue-doc-1', {
+      id: 'operator-1', organizationId: 'org-1', email: 'operator@example.com', role: 'OPERATOR',
+    });
+
+    expect(queueMock.enqueue).toHaveBeenCalledWith(expect.objectContaining({ processingJobId: 'queue-job-1', documentId: 'queue-doc-1' }));
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'PROCESSING_JOB_QUEUED' }) }));
+    expect(result.status).toBe('QUEUED');
+  });
+
+  it('returns the latest processing state only for documents in the requesting organization', async () => {
+    prismaMock.document.findFirst.mockResolvedValue({ id: 'queue-doc-2', status: 'PROCESSING' });
+    prismaMock.processingJob.findFirst.mockResolvedValue({ id: 'queue-job-2', status: 'ACTIVE', currentStep: 'TEXT_EXTRACTION', progress: 20 });
+
+    const result = await service.getDocumentProcessingStatus('queue-doc-2', {
+      id: 'operator-1', organizationId: 'org-1', email: 'operator@example.com', role: 'OPERATOR',
+    });
+
+    expect(prismaMock.document.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'queue-doc-2', organizationId: 'org-1' } }));
+    expect(result.processingJob?.progress).toBe(20);
+  });
+
+  it('scores vendors for repeated risky invoices and possible invoice splitting', async () => {
+    const now = Date.now();
+    prismaMock.document.findMany.mockResolvedValue([
+      { id: 'risk-1', vendorName: 'Northwind', invoiceNumber: 'INV-1', documentType: 'INVOICE', totalAmount: 24000, currency: 'USD', status: 'REVIEW_REQUIRED', createdAt: new Date(now) },
+      { id: 'risk-2', vendorName: 'Northwind', invoiceNumber: 'INV-2', documentType: 'INVOICE', totalAmount: 26000, currency: 'USD', status: 'REVIEW_REQUIRED', createdAt: new Date(now + 1000) },
+      { id: 'risk-3', vendorName: 'Northwind', invoiceNumber: 'INV-3', documentType: 'INVOICE', totalAmount: 12000, currency: 'USD', status: 'APPROVED', createdAt: new Date(now + 2000) },
+    ]);
+    prismaMock.vendorRiskProfile.upsert.mockResolvedValue({ vendorName: 'Northwind', score: 80 });
+    prismaMock.vendorRiskProfile.findMany.mockResolvedValue([{ vendorName: 'Northwind', score: 80 }]);
+
+    await service.recalculateVendorRiskProfiles({ id: 'admin-1', organizationId: 'org-1', email: 'admin@example.com', role: 'ADMIN' });
+
+    expect(prismaMock.vendorRiskProfile.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ vendorName: 'Northwind', currency: 'USD', signals: expect.arrayContaining([expect.stringContaining('near-threshold')]) }),
+    }));
+  });
+
+  it('creates idempotent escalation notifications for tenant administrators', async () => {
+    jest.spyOn(service, 'getEscalationSummary').mockResolvedValue([{
+      id: 'document-alert', documentId: 'document-alert', type: 'SLA_ESCALATION', severity: 'high',
+      vendor: 'Northwind', reviewer: 'Maya Chen', lane: 'FINANCE_REVIEW', documentType: 'INVOICE',
+      status: 'REVIEW_REQUIRED', daysOpen: 4, detail: 'Northwind review is overdue.',
+    }] as any);
+    prismaMock.user.findMany.mockResolvedValue([{ id: 'admin-1' }]);
+    prismaMock.document.findMany.mockResolvedValue([{ id: 'document-alert', assignedReviewerId: null }]);
+    prismaMock.notification.findUnique.mockResolvedValue(null);
+
+    await service.evaluateEscalations({ id: 'admin-1', organizationId: 'org-1', email: 'admin@example.com', role: 'ADMIN' });
+
+    expect(prismaMock.notification.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ userId: 'admin-1', documentId: 'document-alert', type: 'SLA_ESCALATION' }),
+    }));
+    expect(prismaMock.notification.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ organizationId: 'org-1', type: 'SLA_ESCALATION', documentId: { notIn: ['document-alert'] } }),
+    }));
+  });
+
+  it('assigns pending work to the least-loaded organization reviewer and audits it', async () => {
+    prismaMock.document.findFirst.mockResolvedValue({ id: 'assign-1', organizationId: 'org-1', status: 'REVIEW_REQUIRED' });
+    prismaMock.user.findMany.mockResolvedValue([
+      { id: 'reviewer-1', name: 'A Reviewer', email: 'a@example.com' },
+      { id: 'reviewer-2', name: 'B Reviewer', email: 'b@example.com' },
+    ]);
+    prismaMock.reviewAssignment.findMany.mockResolvedValue([{ reviewerId: 'reviewer-1' }]);
+    prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
+    prismaMock.document.update.mockResolvedValue({ id: 'assign-1', assignedReviewerId: 'reviewer-2' });
+
+    const result = await service.assignReviewer('assign-1', {
+      id: 'admin-1', organizationId: 'org-1', email: 'admin@example.com', role: 'ADMIN',
+    });
+
+    expect(prismaMock.document.update).toHaveBeenCalledWith({ where: { id: 'assign-1' }, data: { assignedReviewerId: 'reviewer-2' } });
+    expect(prismaMock.reviewAssignment.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ reviewerId: 'reviewer-2', status: 'ACTIVE' }) }));
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'DOCUMENT_REVIEWER_ASSIGNED' }) }));
+    expect(result.assignedReviewer.id).toBe('reviewer-2');
   });
 
   it('stores uploaded documents and records an audit log', async () => {
@@ -109,7 +201,7 @@ describe('DocumentsService', () => {
       expect.objectContaining({
         where: { id: 'doc-2' },
         data: expect.objectContaining({
-          status: 'PROCESSING',
+          status: 'REVIEW_REQUIRED',
           documentType: 'INVOICE',
           currency: 'USD',
         }),
@@ -196,6 +288,7 @@ describe('DocumentsService', () => {
         },
       },
       orderBy: { createdAt: 'desc' },
+      include: { assignedReviewer: { select: { id: true, name: true, email: true } } },
     });
     expect(result).toHaveLength(1);
   });
@@ -284,6 +377,7 @@ describe('DocumentsService', () => {
         ],
       },
       orderBy: { createdAt: 'desc' },
+      include: { assignedReviewer: { select: { id: true, name: true, email: true } } },
     });
     expect(result).toHaveLength(1);
     expect(result[0]?.id).toBe('doc-search-1');
@@ -584,6 +678,106 @@ describe('DocumentsService', () => {
     );
   });
 
+  it('flags abnormal invoice spikes for a vendor as a high-risk compliance signal', async () => {
+    const now = new Date();
+    prismaMock.document.findMany.mockResolvedValue([
+      {
+        id: 'spike-1',
+        organizationId: 'org-1',
+        status: 'APPROVED',
+        documentType: 'INVOICE',
+        vendorName: 'Northwind',
+        invoiceNumber: 'INV-3001',
+        totalAmount: 1200,
+        currency: 'USD',
+        createdAt: new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000),
+      },
+      {
+        id: 'spike-2',
+        organizationId: 'org-1',
+        status: 'PROCESSING',
+        documentType: 'INVOICE',
+        vendorName: 'Northwind',
+        invoiceNumber: 'INV-3002',
+        totalAmount: 1500,
+        currency: 'USD',
+        createdAt: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+      },
+      {
+        id: 'spike-3',
+        organizationId: 'org-1',
+        status: 'REVIEW_REQUIRED',
+        documentType: 'INVOICE',
+        vendorName: 'Northwind',
+        invoiceNumber: 'INV-3003',
+        totalAmount: 54000,
+        currency: 'USD',
+        createdAt: new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000),
+      },
+    ]);
+
+    const result = await service.getReviewAnalytics({
+      id: 'user-1',
+      organizationId: 'org-1',
+      email: 'admin@example.com',
+      role: 'ADMIN',
+    }, 7);
+
+    expect(result.policyExceptions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'Amount spike risk',
+          vendor: 'Northwind',
+          severity: 'high',
+        }),
+      ]),
+    );
+  });
+
+  it('escalates overdue high-risk invoices to the finance team', async () => {
+    const now = new Date();
+    prismaMock.document.findMany.mockResolvedValue([
+      {
+        id: 'escalation-1',
+        organizationId: 'org-1',
+        status: 'REVIEW_REQUIRED',
+        documentType: 'INVOICE',
+        vendorName: 'Northwind',
+        invoiceNumber: 'INV-5001',
+        totalAmount: 54000,
+        currency: 'USD',
+        createdAt: new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000),
+      },
+      {
+        id: 'escalation-2',
+        organizationId: 'org-1',
+        status: 'PROCESSING',
+        documentType: 'INVOICE',
+        vendorName: 'Bluefin',
+        invoiceNumber: 'INV-5002',
+        totalAmount: 4400,
+        currency: 'USD',
+        createdAt: new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000),
+      },
+    ]);
+
+    const result = await service.getEscalationSummary({
+      id: 'user-1',
+      organizationId: 'org-1',
+      email: 'admin@example.com',
+      role: 'ADMIN',
+    } as any);
+
+    expect(result).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'SLA_ESCALATION',
+        severity: 'high',
+        vendor: 'Northwind',
+        reviewer: 'Maya Chen',
+      }),
+    ]));
+  });
+
   it('exports review analytics as a CSV report', async () => {
     prismaMock.document.findMany.mockResolvedValue([
       {
@@ -686,6 +880,11 @@ describe('DocumentsService', () => {
 
     expect(prismaMock.document.findFirst).toHaveBeenCalledWith({
       where: { id: 'doc-5', organizationId: 'org-1' },
+      include: {
+        assignedReviewer: { select: { id: true, name: true, email: true } },
+        classification: true,
+        extractedFields: { orderBy: { fieldName: 'asc' } },
+      },
     });
     expect(result.summary).toContain('Invoice');
     expect(result.summary).toContain('Requires review');
@@ -777,6 +976,34 @@ trailer
     }
   });
 
+  it('preprocesses images and compares multiple Tesseract page segmentation modes', async () => {
+    const imagePath = path.resolve(process.cwd(), 'tmp-enhanced-scan.png');
+    await fs.writeFile(imagePath, Buffer.from('fake-png-content'));
+    const previousProcessor = process.env.OCR_IMAGE_PROCESSOR_PATH;
+    const previousPreprocessing = process.env.OCR_PREPROCESSING_ENABLED;
+    process.env.OCR_IMAGE_PROCESSOR_PATH = 'mock-image-processor';
+    process.env.OCR_PREPROCESSING_ENABLED = 'true';
+    const commandSpy = jest.spyOn(service as any, 'runOcrCommand').mockImplementation(((binary: string, args: string[]) => {
+      if (binary === 'mock-image-processor') return Buffer.alloc(0);
+      return args.includes('11') ? 'Vendor INV-2048 total 1,200 USD' : 'Vendor INV-2048';
+    }) as any);
+
+    try {
+      const result = await (service as any).extractImageTextWithOcr(imagePath);
+      expect(result).toContain('total 1,200 USD');
+      expect(commandSpy).toHaveBeenCalledWith('mock-image-processor', expect.arrayContaining(['-normalize', '-contrast-stretch', '-sharpen']), expect.any(Object));
+      expect(commandSpy.mock.calls.some(([, args]) => Array.isArray(args) && args.includes('--psm') && args.includes('6'))).toBe(true);
+      expect(commandSpy.mock.calls.some(([, args]) => Array.isArray(args) && args.includes('--psm') && args.includes('11'))).toBe(true);
+    } finally {
+      commandSpy.mockRestore();
+      if (previousProcessor === undefined) delete process.env.OCR_IMAGE_PROCESSOR_PATH;
+      else process.env.OCR_IMAGE_PROCESSOR_PATH = previousProcessor;
+      if (previousPreprocessing === undefined) delete process.env.OCR_PREPROCESSING_ENABLED;
+      else process.env.OCR_PREPROCESSING_ENABLED = previousPreprocessing;
+      await fs.unlink(imagePath).catch(() => undefined);
+    }
+  });
+
   it('uses OCR fallback for scanned images before parsing invoice fields', async () => {
     const imagePath = path.resolve(process.cwd(), 'tmp-scan.png');
     await fs.writeFile(imagePath, Buffer.from('fake-png-content'));
@@ -832,6 +1059,70 @@ trailer
     expect(result.requiresReview).toBe(false);
   });
 
+  it('routes high-risk invoice work to the finance review lane and recommends the right reviewer', () => {
+    const financeLane = (service as any).getRecommendedReviewLane({ documentType: 'INVOICE', totalAmount: 75000 }, 86);
+    const financeReviewer = (service as any).getRecommendedReviewer({ documentType: 'INVOICE', totalAmount: 75000 }, 86);
+    const bankingLane = (service as any).getRecommendedReviewLane({ documentType: 'BANK_STATEMENT' }, 24);
+    const bankingReviewer = (service as any).getRecommendedReviewer({ documentType: 'BANK_STATEMENT' }, 24);
+
+    expect(financeLane).toBe('FINANCE_REVIEW');
+    expect(financeReviewer).toBe('Maya Chen');
+    expect(bankingLane).toBe('BANKING_REVIEW');
+    expect(bankingReviewer).toBe('Nina Patel');
+  });
+
+  it('classifies a generic filename based on extracted document content', async () => {
+    prismaMock.document.findFirst.mockResolvedValue({
+      id: 'doc-classify-text',
+      organizationId: 'org-1',
+      filename: 'upload-2026.pdf',
+      mimeType: 'application/pdf',
+      size: 2048,
+      status: 'UPLOADED',
+      documentType: 'UNKNOWN',
+      vendorName: null,
+      invoiceNumber: null,
+      invoiceDate: null,
+      dueDate: null,
+      totalAmount: null,
+      currency: null,
+      storagePath: 'storage/organizations/org-1/documents/upload-2026.pdf',
+    });
+
+    const readSpy = jest.spyOn(service as any, 'readDocumentTextHint').mockResolvedValue('BANK OF AMERICA STATEMENT Account Ending 1234');
+    prismaMock.document.update.mockResolvedValue({
+      id: 'doc-classify-text',
+      organizationId: 'org-1',
+      filename: 'upload-2026.pdf',
+      mimeType: 'application/pdf',
+      size: 2048,
+      status: 'PROCESSING',
+      documentType: 'BANK_STATEMENT',
+      vendorName: null,
+      invoiceNumber: null,
+      invoiceDate: null,
+      dueDate: null,
+      totalAmount: null,
+      currency: 'USD',
+      extractedAt: new Date(),
+    });
+
+    const result = await service.processDocument('doc-classify-text', {
+      id: 'user-1',
+      organizationId: 'org-1',
+      email: 'admin@example.com',
+      role: 'ADMIN',
+    });
+
+    expect(readSpy).toHaveBeenCalledWith('storage/organizations/org-1/documents/upload-2026.pdf');
+    expect(prismaMock.document.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'doc-classify-text' },
+      data: expect.objectContaining({ documentType: 'BANK_STATEMENT' }),
+    }));
+    expect(result.documentType).toBe('BANK_STATEMENT');
+    readSpy.mockRestore();
+  });
+
   it('flags duplicate invoice numbers across the same organization as a compliance risk', async () => {
     prismaMock.document.findFirst.mockResolvedValue({
       id: 'doc-dup-new',
@@ -880,6 +1171,7 @@ trailer
       extractedAt: new Date(),
     });
 
+    const textSpy = jest.spyOn(service as any, 'readDocumentTextHint').mockResolvedValue('Vendor: Acme Supplies\nInvoice Number: 1042\nInvoice Date: 2026-09-01\nDue Date: 2026-09-30\nSubtotal: 1500\nTax: 0\nTotal: 1500\nCurrency: USD');
     const result = await service.processDocument('doc-dup-new', {
       id: 'user-1',
       organizationId: 'org-1',
@@ -904,6 +1196,7 @@ trailer
         }),
       }),
     }));
+    textSpy.mockRestore();
   });
 
   it('flags incomplete invoice metadata for review', () => {
