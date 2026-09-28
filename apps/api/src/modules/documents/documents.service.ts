@@ -732,17 +732,21 @@ export class DocumentsService {
   }
 
   async getReviewAnalytics(user: AuthUser, periodDays = 7) {
+    const normalizedPeriodDays = Number.isFinite(periodDays) ? Math.min(90, Math.max(1, Math.floor(periodDays))) : 7;
+    const periodStart = new Date(Date.now() - normalizedPeriodDays * 24 * 60 * 60 * 1000);
     const documents = await this.prisma.document.findMany({
       where: { organizationId: user.organizationId },
       orderBy: { createdAt: 'desc' },
+      include: { fraudAssessment: true },
     });
 
-    const totalDocuments = documents.length;
-    const approvedCount = documents.filter((document) => document.status === 'APPROVED').length;
-    const reviewCount = documents.filter((document) => ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'].includes(document.status)).length;
+    const periodDocuments = documents.filter((document) => new Date(document.createdAt).getTime() >= periodStart.getTime());
+    const totalDocuments = periodDocuments.length;
+    const approvedCount = periodDocuments.filter((document) => document.status === 'APPROVED').length;
+    const reviewCount = periodDocuments.filter((document) => ['PROCESSING', 'EXTRACTED', 'VALIDATING', 'REVIEW_REQUIRED'].includes(document.status)).length;
     const approvalRate = totalDocuments > 0 ? Number(((approvedCount / totalDocuments) * 100).toFixed(0)) : 0;
 
-    const riskBreakdown = documents.reduce(
+    const riskBreakdown = periodDocuments.reduce(
       (accumulator, document) => {
         const score = this.getDocumentRiskScore(document);
         if (score >= 60) {
@@ -758,7 +762,7 @@ export class DocumentsService {
     );
 
     const vendorRisk = Object.entries(
-      documents.reduce<Record<string, number>>((accumulator, document) => {
+      periodDocuments.reduce<Record<string, number>>((accumulator, document) => {
         const vendorName = (document.vendorName ?? 'Unknown').trim();
         if (!vendorName) {
           return accumulator;
@@ -785,6 +789,7 @@ export class DocumentsService {
       overdueCount: agingDays.filter((value) => value > 3).length,
     };
 
+    // Duplicate invoices and vendor history are cross-period controls; keep their baselines across the full organization history.
     const invoicePatternMap = new Map<string, { vendor: string; invoiceNumber: string; count: number; totalAmount: number }>();
     for (const document of documents) {
       const vendorName = (document.vendorName ?? '').trim();
@@ -866,12 +871,68 @@ export class DocumentsService {
       return severityWeight[right.severity] - severityWeight[left.severity];
     });
 
-    const escalations = await this.getEscalationSummary(user);
+    const [escalations, reviewEventsResult] = await Promise.all([
+      this.getEscalationSummary(user),
+      this.prisma.auditLog.findMany({
+        where: { organizationId: user.organizationId, action: 'DOCUMENT_REVIEWED', createdAt: { gte: periodStart } },
+        orderBy: { createdAt: 'asc' },
+        include: { user: { select: { id: true, name: true, email: true } }, document: { select: { createdAt: true } } },
+      }),
+    ]);
+    const reviewEvents = reviewEventsResult ?? [];
 
-    const trendDates = Array.from({ length: Math.max(1, periodDays) }, (_, index) => {
-      const date = new Date();
-      date.setHours(0, 0, 0, 0);
-      date.setDate(date.getDate() - (Math.max(1, periodDays) - 1 - index));
+    const reviewerMetrics = new Map<string, {
+      reviewerId: string | null; name: string; email: string; decisions: number; approved: number; rejected: number;
+      needsReview: number; turnaroundTotalHours: number; turnaroundSamples: number; lastReviewedAt: Date;
+    }>();
+    for (const event of reviewEvents) {
+      const metadata = event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
+        ? event.metadata as Record<string, unknown>
+        : {};
+      const reviewerEmail = typeof metadata.reviewerEmail === 'string' ? metadata.reviewerEmail : '';
+      const key = event.userId ?? (reviewerEmail || 'unknown');
+      const current = reviewerMetrics.get(key) ?? {
+        reviewerId: event.userId ?? null,
+        name: event.user?.name ?? (reviewerEmail || 'Former user'),
+        email: event.user?.email ?? reviewerEmail,
+        decisions: 0, approved: 0, rejected: 0, needsReview: 0,
+        turnaroundTotalHours: 0, turnaroundSamples: 0, lastReviewedAt: event.createdAt,
+      };
+      current.decisions += 1;
+      const decision = metadata.decision;
+      if (decision === 'APPROVED') current.approved += 1;
+      else if (decision === 'REJECTED') current.rejected += 1;
+      else if (decision === 'REVIEW_REQUIRED') current.needsReview += 1;
+      if (event.document?.createdAt) {
+        const elapsedHours = (event.createdAt.getTime() - event.document.createdAt.getTime()) / (60 * 60 * 1000);
+        if (elapsedHours >= 0) {
+          current.turnaroundTotalHours += elapsedHours;
+          current.turnaroundSamples += 1;
+        }
+      }
+      if (event.createdAt > current.lastReviewedAt) current.lastReviewedAt = event.createdAt;
+      reviewerMetrics.set(key, current);
+    }
+    const reviewerPerformance = [...reviewerMetrics.values()]
+      .map((reviewer) => ({
+        reviewerId: reviewer.reviewerId,
+        name: reviewer.name,
+        email: reviewer.email,
+        decisions: reviewer.decisions,
+        approved: reviewer.approved,
+        rejected: reviewer.rejected,
+        needsReview: reviewer.needsReview,
+        averageDecisionHours: reviewer.turnaroundSamples
+          ? Number((reviewer.turnaroundTotalHours / reviewer.turnaroundSamples).toFixed(1))
+          : null,
+        lastReviewedAt: reviewer.lastReviewedAt,
+      }))
+      .sort((left, right) => right.decisions - left.decisions || left.name.localeCompare(right.name));
+
+    const now = new Date();
+    const trendDates = Array.from({ length: normalizedPeriodDays }, (_, index) => {
+      const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+      date.setUTCDate(date.getUTCDate() - (normalizedPeriodDays - 1 - index));
       return date;
     });
 
@@ -891,7 +952,7 @@ export class DocumentsService {
     });
 
     return {
-      periodDays,
+      periodDays: normalizedPeriodDays,
       totalDocuments,
       approvedCount,
       reviewCount,
@@ -901,12 +962,13 @@ export class DocumentsService {
       agingSummary,
       policyExceptions,
       escalations,
+      reviewerPerformance,
       dailyTrend,
-      statusBreakdown: documents.reduce<Record<string, number>>((accumulator, document) => {
+      statusBreakdown: periodDocuments.reduce<Record<string, number>>((accumulator, document) => {
         accumulator[document.status] = (accumulator[document.status] ?? 0) + 1;
         return accumulator;
       }, {}),
-      typeBreakdown: documents.reduce<Record<string, number>>((accumulator, document) => {
+      typeBreakdown: periodDocuments.reduce<Record<string, number>>((accumulator, document) => {
         const typeKey = document.documentType ?? 'UNKNOWN';
         accumulator[typeKey] = (accumulator[typeKey] ?? 0) + 1;
         return accumulator;
@@ -936,6 +998,7 @@ export class DocumentsService {
       ['overdueCount', String(analytics.agingSummary.overdueCount)],
       ['policyExceptions', JSON.stringify(analytics.policyExceptions)],
       ['escalations', JSON.stringify(analytics.escalations ?? [])],
+      ['reviewerPerformance', JSON.stringify(analytics.reviewerPerformance)],
       ['vendorRisk', JSON.stringify(analytics.vendorRisk)],
       ['dailyTrend', JSON.stringify(analytics.dailyTrend)],
       ['vendorRiskProfiles', JSON.stringify(vendorRiskProfiles)],
@@ -1821,6 +1884,7 @@ export class DocumentsService {
     status?: string | null;
     invoiceDate?: Date | string | null;
     dueDate?: Date | string | null;
+    fraudAssessment?: { score?: number | null } | null;
   }): number {
     let riskScore = 0;
 
@@ -1859,7 +1923,7 @@ export class DocumentsService {
       riskScore += 20;
     }
 
-    return riskScore;
+    return Math.min(100, Math.max(riskScore, Number(document.fraudAssessment?.score ?? 0)));
   }
 
   private buildSummary(

@@ -81,6 +81,10 @@ type ReviewAnalytics = {
   }>;
   escalations?: EscalationAlert[];
   dailyTrend: Array<{ date: string; total: number; approved: number; review: number }>;
+  reviewerPerformance: Array<{
+    reviewerId: string | null; name: string; email: string; decisions: number; approved: number; rejected: number;
+    needsReview: number; averageDecisionHours: number | null; lastReviewedAt: string;
+  }>;
   statusBreakdown: Record<string, number>;
   typeBreakdown: Record<string, number>;
 };
@@ -117,6 +121,7 @@ function App(): JSX.Element {
     typeBreakdown: {},
   });
   const [reviewAnalytics, setReviewAnalytics] = useState<ReviewAnalytics | null>(null);
+  const [analyticsPeriodDays, setAnalyticsPeriodDays] = useState(7);
   const [reviewerWorkload, setReviewerWorkload] = useState<ReviewerWorkload[]>([]);
   const [notifications, setNotifications] = useState<OperationalNotification[]>([]);
   const [vendorRiskProfiles, setVendorRiskProfiles] = useState<VendorRiskProfile[]>([]);
@@ -235,12 +240,12 @@ function App(): JSX.Element {
     }
   }
 
-  async function loadReviewAnalytics(): Promise<void> {
+  async function loadReviewAnalytics(days = analyticsPeriodDays): Promise<void> {
     if (!token) {
       return;
     }
 
-    const response = await fetch('http://localhost:3001/api/documents/analytics?days=7', {
+    const response = await fetch(`http://localhost:3001/api/documents/analytics?days=${days}`, {
       headers: {
         Authorization: `Bearer ${token}`,
       },
@@ -312,7 +317,7 @@ function App(): JSX.Element {
       return;
     }
 
-    const response = await fetch('http://localhost:3001/api/documents/analytics/export?days=7', {
+    const response = await fetch(`http://localhost:3001/api/documents/analytics/export?days=${analyticsPeriodDays}`, {
       headers: {
         Authorization: `Bearer ${token}`,
       },
@@ -874,9 +879,21 @@ function App(): JSX.Element {
             <div className="panel-header">
               <p className="eyebrow accent">OPERATIONS</p>
               <h3>Review analytics</h3>
-              <button type="button" className="secondary-button" onClick={handleExportAnalytics} style={{ marginLeft: 'auto' }}>
-                Export CSV
-              </button>
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: '6px' }}>
+                {[7, 30, 90].map((days) => (
+                  <button
+                    key={days}
+                    type="button"
+                    className="secondary-button compact-button"
+                    style={analyticsPeriodDays === days ? { background: '#edf7f2', borderColor: '#6cae99' } : undefined}
+                    onClick={() => { setAnalyticsPeriodDays(days); void loadReviewAnalytics(days); }}
+                    aria-pressed={analyticsPeriodDays === days}
+                  >{days}d</button>
+                ))}
+                <button type="button" className="secondary-button" onClick={handleExportAnalytics}>
+                  Export CSV
+                </button>
+              </div>
             </div>
             <div className="detail-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', marginTop: '12px' }}>
               <div>
@@ -888,7 +905,7 @@ function App(): JSX.Element {
                 <strong>{reviewAnalytics.riskBreakdown.high}</strong>
               </div>
               <div>
-                <span className="meta-label">Queue aging</span>
+                <span className="meta-label">Current queue aging</span>
                 <strong>{reviewAnalytics.agingSummary.avgQueueDays.toFixed(1)} days</strong>
               </div>
               <div>
@@ -927,6 +944,20 @@ function App(): JSX.Element {
                     </li>
                   )) : <li>No active escalations</li>}
                 </ul>
+              </div>
+
+              <div>
+                <span className="meta-label">Reviewer performance · {reviewAnalytics.periodDays} days</span>
+                {reviewAnalytics.reviewerPerformance.length ? (
+                  <ul style={{ margin: '8px 0 0', paddingLeft: '18px' }}>
+                    {reviewAnalytics.reviewerPerformance.slice(0, 5).map((reviewer) => (
+                      <li key={reviewer.reviewerId ?? reviewer.email}>
+                        <strong>{reviewer.name}</strong>: {reviewer.decisions} decisions ({reviewer.approved} approved, {reviewer.rejected} rejected)
+                        {reviewer.averageDecisionHours !== null ? ` · ${reviewer.averageDecisionHours}h avg upload-to-decision` : ''}
+                      </li>
+                    ))}
+                  </ul>
+                ) : <small>No completed reviews in this period.</small>}
               </div>
 
               <div>
