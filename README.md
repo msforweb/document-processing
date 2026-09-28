@@ -63,7 +63,7 @@ Phase 2 will add organizations, roles, document records, secure local storage, a
 
 ## OCR and operational review enhancements
 
-The local OCR fallback supports Tesseract. For scanned PDFs, install Poppler (`pdftoppm`) to render pages before OCR. Image cleanup is optional and uses ImageMagick (`magick` or `convert`) when available. The API gracefully falls back to the original image when preprocessing tools are missing. Configure binary paths, OCR languages, PDF resolution/page limits, and preprocessing in `.env` using the `TESSERACT_*`, `PDFTOPPM_PATH`, and `OCR_*` settings.
+The local OCR fallback supports Tesseract. For scanned PDFs, install Poppler (`pdftoppm`) to render pages before OCR. Image cleanup is optional and uses ImageMagick (`magick` or `convert`) when available. OCR compares a balanced grayscale/deskew pass, an adaptive local-threshold pass for uneven lighting, and the original image across several Tesseract page layouts, then selects the result using document-text structure signals. The API gracefully falls back to the original image when preprocessing tools are missing. Toggle the adaptive pass with `OCR_ADAPTIVE_THRESHOLD_ENABLED`. Configure binary paths, OCR languages, PDF resolution/page limits, and preprocessing in `.env` using the `TESSERACT_*`, `PDFTOPPM_PATH`, and `OCR_*` settings.
 
 Reviewer assignments, escalation notifications, and vendor risk profiles are persisted in PostgreSQL. After starting PostgreSQL, apply the migrations with:
 

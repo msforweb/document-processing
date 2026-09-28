@@ -1645,21 +1645,21 @@ export class DocumentsService {
       for (let pageIndex = 0; pageIndex < pagePaths.length; pageIndex += 1) {
         const sourcePath = pagePaths[pageIndex];
         if (!sourcePath) continue;
-        const enhancedPath = process.env.OCR_PREPROCESSING_ENABLED === 'false'
-          ? null
-          : await this.preprocessOcrImage(sourcePath, temporaryDirectory, pageIndex);
-        const ocrInputs = enhancedPath ? [enhancedPath, sourcePath] : [sourcePath];
+        const processedPaths = process.env.OCR_PREPROCESSING_ENABLED === 'false'
+          ? []
+          : await this.preprocessOcrImageVariants(sourcePath, temporaryDirectory, pageIndex);
+        const ocrInputs = [...processedPaths, sourcePath];
         let bestText = '';
 
         for (const imagePath of ocrInputs) {
-          for (const psm of ['6', '11']) {
+          for (const psm of ['6', '11', '4']) {
             for (const binary of binaryCandidates) {
               try {
                 const output = await this.runOcrCommand(binary, [imagePath, 'stdout', '--oem', process.env.TESSERACT_OEM?.trim() || '1', '--psm', psm, '-l', process.env.TESSERACT_LANGUAGES?.trim() || 'eng'], {
                   encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, maxBuffer: 5 * 1024 * 1024,
                 });
                 const cleaned = String(output ?? '').replace(/\s+/g, ' ').trim();
-                if (this.countOcrCharacters(cleaned) > this.countOcrCharacters(bestText)) bestText = cleaned;
+                if (this.scoreOcrText(cleaned) > this.scoreOcrText(bestText)) bestText = cleaned;
               } catch {
                 // Try a different segmentation mode or configured Tesseract binary.
               }
@@ -1674,10 +1674,28 @@ export class DocumentsService {
     }
   }
 
-  private async preprocessOcrImage(filePath: string, temporaryDirectory: string, pageIndex: number): Promise<string | null> {
-    const outputPath = path.join(temporaryDirectory, `enhanced-${pageIndex}.png`);
+  private async preprocessOcrImageVariants(filePath: string, temporaryDirectory: string, pageIndex: number): Promise<string[]> {
+    const variants: string[] = [];
+    const balancedPath = await this.preprocessOcrImage(filePath, temporaryDirectory, pageIndex, 'balanced');
+    if (balancedPath) variants.push(balancedPath);
+    if (process.env.OCR_ADAPTIVE_THRESHOLD_ENABLED !== 'false') {
+      const thresholdPath = await this.preprocessOcrImage(filePath, temporaryDirectory, pageIndex, 'adaptive');
+      if (thresholdPath) variants.push(thresholdPath);
+    }
+    return variants;
+  }
+
+  private async preprocessOcrImage(
+    filePath: string,
+    temporaryDirectory: string,
+    pageIndex: number,
+    variant: 'balanced' | 'adaptive' = 'balanced',
+  ): Promise<string | null> {
+    const outputPath = path.join(temporaryDirectory, `${variant}-${pageIndex}.png`);
     const processors = [process.env.OCR_IMAGE_PROCESSOR_PATH?.trim(), 'magick', 'convert'].filter(Boolean) as string[];
-    const adjustments = ['-colorspace', 'Gray', '-deskew', '40%', '-normalize', '-contrast-stretch', '1%x1%', '-sharpen', '0x1'];
+    const adjustments = variant === 'adaptive'
+      ? ['-colorspace', 'Gray', '-deskew', '40%', '-brightness-contrast', '5x25', '-adaptive-threshold', '31x31+12%', '-despeckle']
+      : ['-colorspace', 'Gray', '-deskew', '40%', '-normalize', '-contrast-stretch', '1%x1%', '-sharpen', '0x1'];
 
     for (const binary of processors) {
       try {
@@ -1687,7 +1705,7 @@ export class DocumentsService {
         await this.runOcrCommand(binary, args, { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30_000, maxBuffer: 5 * 1024 * 1024 });
         return outputPath;
       } catch {
-        // ImageMagick is optional; continue with the original image if unavailable.
+        // ImageMagick is optional; continue with other preprocessing and the original image.
       }
     }
     return null;
@@ -1708,6 +1726,18 @@ export class DocumentsService {
 
   private countOcrCharacters(value: string): number {
     return (value.match(/[\p{L}\p{N}]/gu) ?? []).length;
+  }
+
+  private scoreOcrText(value: string): number {
+    const text = value.toLowerCase();
+    const characters = this.countOcrCharacters(text);
+    if (!characters) return 0;
+    const words = text.match(/[\p{L}\p{N}]+/gu) ?? [];
+    const documentTerms = (text.match(/\b(invoice|total|amount|date|due|vendor|supplier|account|statement|balance|currency|name|address|tax|payment|reference|report)\b/g) ?? []).length;
+    const structuredTokens = (text.match(/\b[a-z0-9][a-z0-9/-]{3,}\b/gi) ?? []).length;
+    const noiseCharacters = (text.match(/[^\p{L}\p{N}\s.,:;()/%$#&'\-]/gu) ?? []).length;
+    const repeatedNoise = (text.match(/([\p{L}\p{N}])\1{3,}/gu) ?? []).length;
+    return characters + Math.min(words.length, 120) * 2 + documentTerms * 8 + structuredTokens * 4 - noiseCharacters * 2 - repeatedNoise * 5;
   }
 
   private extractPdfText(buffer: Buffer): string {
