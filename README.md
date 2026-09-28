@@ -71,7 +71,7 @@ Reviewer assignments, escalation notifications, and vendor risk profiles are per
 npm run db:migrate
 ```
 
-The operations console refreshes vendor risk profiles when its data refreshes. SLA escalation evaluation runs in the API on a five-minute interval by default and also remains available from the dashboard. Configure `ESCALATION_EVALUATION_ENABLED` and `ESCALATION_EVALUATION_INTERVAL_MS` in `.env` to control the scheduler. Notifications are in-app alerts for organization administrators and each document's assigned reviewer; email delivery is not configured.
+The operations console refreshes vendor risk profiles when its data refreshes. SLA escalation evaluation runs in the API on a five-minute interval by default and also remains available from the dashboard. Configure `ESCALATION_EVALUATION_ENABLED` and `ESCALATION_EVALUATION_INTERVAL_MS` in `.env` to control the scheduler. Notifications are in-app alerts for organization administrators and each document's assigned reviewer. Optional email delivery uses Resend when `RESEND_API_KEY` and `NOTIFICATION_EMAIL_FROM` are configured; delivery failures are logged without interrupting review workflows.
 
 Invoice fraud assessments are stored per document and include weighted, explainable signals for duplicate invoice numbers, vendor amount outliers, submission bursts, new high-value vendors, round high-value amounts, and date inconsistencies. Processing an invoice updates its assessment; `POST /api/documents/fraud-assessments/recalculate` reevaluates the organization's invoices. Document detail includes the current score and signal explanations. These are review signals, not determinations of fraud.
 

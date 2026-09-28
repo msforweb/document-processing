@@ -9,11 +9,12 @@ import { DocumentsProcessor } from './documents.processor';
 import { ProcessingQueueService } from './processing-queue.service';
 import { LocalDocumentAiProvider } from './processing/local-document-ai.provider';
 import { EscalationScheduler } from './escalation.scheduler';
+import { NotificationDeliveryService } from './notification-delivery.service';
 
 @Module({
   imports: [AuthModule],
   controllers: [DocumentsController],
-  providers: [DocumentsService, DocumentsProcessor, ProcessingQueueService, EscalationScheduler, LocalDocumentAiProvider, LocalStorageService, RolesGuard, JwtAuthGuard],
+  providers: [DocumentsService, DocumentsProcessor, ProcessingQueueService, EscalationScheduler, NotificationDeliveryService, LocalDocumentAiProvider, LocalStorageService, RolesGuard, JwtAuthGuard],
   exports: [DocumentsService],
 })
 export class DocumentsModule {}

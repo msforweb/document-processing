@@ -10,6 +10,7 @@ import { ProcessingQueueService } from './processing-queue.service';
 import { DocumentAiProvider } from './processing/document-ai-provider';
 import { DocumentExtractionPipeline } from './processing/document-extraction.pipeline';
 import { LocalDocumentAiProvider } from './processing/local-document-ai.provider';
+import { NotificationDeliveryService } from './notification-delivery.service';
 
 type InvoiceExtractionResult = {
   vendorName: string;
@@ -40,6 +41,8 @@ export class DocumentsService {
     private readonly processingQueue?: ProcessingQueueService,
     @Optional() @Inject(LocalDocumentAiProvider)
     documentAiProvider?: DocumentAiProvider,
+    @Optional() @Inject(NotificationDeliveryService)
+    private readonly notificationDelivery?: NotificationDeliveryService,
   ) {
     this.extractionPipeline = new DocumentExtractionPipeline(documentAiProvider ?? new LocalDocumentAiProvider());
   }
@@ -445,17 +448,26 @@ export class DocumentsService {
     const escalations = await this.getEscalationSummary(user);
     const activeDocumentIds = escalations.map((entry) => entry.documentId);
     const [admins, activeDocuments] = await Promise.all([
-      this.prisma.user.findMany({ where: { organizationId: user.organizationId, role: 'ADMIN' }, select: { id: true } }),
+      this.prisma.user.findMany({ where: { organizationId: user.organizationId, role: 'ADMIN' }, select: { id: true, email: true } }),
       activeDocumentIds.length
-        ? this.prisma.document.findMany({ where: { id: { in: activeDocumentIds }, organizationId: user.organizationId }, select: { id: true, assignedReviewerId: true } })
+        ? this.prisma.document.findMany({
+            where: { id: { in: activeDocumentIds }, organizationId: user.organizationId },
+            select: { id: true, assignedReviewer: { select: { id: true, email: true } } },
+          })
         : Promise.resolve([]),
     ]);
-    const reviewersByDocument = new Map(activeDocuments.map((document) => [document.id, document.assignedReviewerId]));
+    const reviewersByDocument = new Map(activeDocuments.map((document) => [document.id, document.assignedReviewer]));
+    let notified = 0;
 
     for (const escalation of escalations) {
-      const recipientIds = [...new Set([...(admins ?? []).map((admin) => admin.id), reviewersByDocument.get(escalation.documentId)].filter((id): id is string => Boolean(id)))];
+      const reviewer = reviewersByDocument.get(escalation.documentId);
+      const recipients = [...new Map([
+        ...(admins ?? []).map((admin) => [admin.id, admin] as const),
+        ...(reviewer ? [[reviewer.id, reviewer] as const] : []),
+      ]).values()];
       const eventKey = `SLA_ESCALATION:${escalation.documentId}`;
-      for (const recipientId of recipientIds) {
+      for (const recipient of recipients) {
+        const recipientId = recipient.id;
         const existing = await this.prisma.notification.findUnique({ where: { userId_eventKey: { userId: recipientId, eventKey } } });
         const data = {
           organizationId: user.organizationId,
@@ -467,16 +479,23 @@ export class DocumentsService {
           title: `${escalation.severity.toUpperCase()} review escalation`,
           message: escalation.detail,
         };
+        let sendEmail = false;
         if (!existing) {
           try {
             await this.prisma.notification.create({ data });
+            sendEmail = true;
           } catch (error) {
             if (!(error && typeof error === 'object' && 'code' in error && error.code === 'P2002')) throw error;
           }
         } else if (existing.resolvedAt) {
           await this.prisma.notification.update({ where: { id: existing.id }, data: { ...data, readAt: null, resolvedAt: null } });
+          sendEmail = true;
+        }
+        if (sendEmail && recipient.email) {
+          await this.notificationDelivery?.sendEscalationEmail({ to: recipient.email, title: data.title, message: data.message });
         }
       }
+      notified += recipients.length;
     }
 
     await this.prisma.notification.updateMany({
@@ -488,7 +507,7 @@ export class DocumentsService {
       },
       data: { resolvedAt: new Date() },
     });
-    return { evaluated: escalations.length, notified: escalations.reduce((total, escalation) => total + (admins?.length ?? 0) + (reviewersByDocument.get(escalation.documentId) ? 1 : 0), 0), escalations };
+    return { evaluated: escalations.length, notified, escalations };
   }
 
   async evaluateEscalationsForAllOrganizations() {
