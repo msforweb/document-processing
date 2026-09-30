@@ -1,4 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -574,14 +575,29 @@ export class DocumentsService {
       throw new BadRequestException('Only pending documents can be assigned for review.');
     }
 
-    const workload = await this.getReviewerWorkload(user);
-    if (!workload.length) throw new BadRequestException('No reviewers are available in this organization.');
-    const chosenReviewer = reviewerId
-      ? workload.find((reviewer) => reviewer.id === reviewerId)
-      : [...workload].sort((left, right) => left.activeAssignments - right.activeAssignments || left.name.localeCompare(right.name) || left.id.localeCompare(right.id))[0];
-    if (!chosenReviewer) throw new BadRequestException('The selected user is not an eligible reviewer in this organization.');
-
     return this.prisma.$transaction(async (tx) => {
+      // Serialize automatic assignment decisions within an organization so concurrent uploads
+      // cannot all observe the same stale reviewer workload and pile onto one reviewer.
+      await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${user.organizationId}, 0))`);
+      const [reviewers, activeAssignments] = await Promise.all([
+        tx.user.findMany({
+          where: { organizationId: user.organizationId, role: 'REVIEWER' },
+          select: { id: true, name: true, email: true },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        }),
+        tx.reviewAssignment.findMany({
+          where: { organizationId: user.organizationId, status: 'ACTIVE' },
+          select: { reviewerId: true },
+        }),
+      ]);
+      if (!reviewers.length) throw new BadRequestException('No reviewers are available in this organization.');
+      const workload = new Map<string, number>();
+      for (const assignment of activeAssignments) workload.set(assignment.reviewerId, (workload.get(assignment.reviewerId) ?? 0) + 1);
+      const chosenReviewer = reviewerId
+        ? reviewers.find((reviewer) => reviewer.id === reviewerId)
+        : [...reviewers].sort((left, right) => (workload.get(left.id) ?? 0) - (workload.get(right.id) ?? 0) || left.name.localeCompare(right.name) || left.id.localeCompare(right.id))[0];
+      if (!chosenReviewer) throw new BadRequestException('The selected user is not an eligible reviewer in this organization.');
+
       await tx.reviewAssignment.updateMany({
         where: { organizationId: user.organizationId, documentId: id, status: 'ACTIVE' },
         data: { status: 'REASSIGNED', completedAt: new Date() },

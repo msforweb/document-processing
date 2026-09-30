@@ -6,6 +6,7 @@ import { DocumentsService } from './documents.service';
 describe('DocumentsService', () => {
   const prismaMock = {
     $transaction: jest.fn(),
+    $queryRaw: jest.fn(),
     document: {
       create: jest.fn(),
       findMany: jest.fn(),
@@ -116,6 +117,7 @@ describe('DocumentsService', () => {
       id: 'admin-1', organizationId: 'org-1', email: 'admin@example.com', role: 'ADMIN',
     });
 
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
     expect(prismaMock.document.update).toHaveBeenCalledWith({ where: { id: 'assign-1' }, data: { assignedReviewerId: 'reviewer-2' } });
     expect(prismaMock.reviewAssignment.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ reviewerId: 'reviewer-2', status: 'ACTIVE' }) }));
     expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'DOCUMENT_REVIEWER_ASSIGNED' }) }));
