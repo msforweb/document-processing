@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { DocumentsService } from './documents.service';
 
 @Injectable()
@@ -7,7 +7,7 @@ export class EscalationScheduler implements OnModuleInit, OnModuleDestroy {
   private timer?: NodeJS.Timeout;
   private running = false;
 
-  constructor(private readonly documentsService: DocumentsService) {}
+  constructor(@Inject(DocumentsService) private readonly documentsService: DocumentsService) {}
 
   onModuleInit(): void {
     if (process.env.ESCALATION_EVALUATION_ENABLED === 'false') {

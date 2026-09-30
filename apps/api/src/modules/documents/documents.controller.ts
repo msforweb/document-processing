@@ -89,6 +89,26 @@ export class DocumentsController {
     });
   }
 
+  @Get('export.json')
+  @Header('Content-Type', 'application/json; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="review-queue.json"')
+  @Roles('ADMIN', 'OPERATOR', 'REVIEWER')
+  @UseGuards(RolesGuard)
+  async exportReviewQueueJson(
+    @CurrentUser() user: AuthUser,
+    @Query('status') status?: string,
+    @Query('documentType') documentType?: string,
+    @Query('onlyHighRisk') onlyHighRisk?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.documentsService.exportReviewQueueJson(user, {
+      ...(status ? { status } : {}),
+      ...(documentType ? { documentType } : {}),
+      onlyHighRisk: onlyHighRisk === 'true' || onlyHighRisk === '1',
+      ...(search ? { search } : {}),
+    });
+  }
+
   @Get('export')
   @Header('Content-Type', 'text/csv; charset=utf-8')
   @Header('Content-Disposition', 'attachment; filename="review-queue.csv"')

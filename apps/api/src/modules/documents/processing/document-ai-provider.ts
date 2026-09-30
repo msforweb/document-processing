@@ -6,6 +6,8 @@ export type ExtractedValues = Record<string, ExtractedValue>;
 
 export interface DocumentAiProvider {
   readonly name: string;
-  classifyDocument(filename: string, text: string): ClassifiedDocument;
-  extractFields(documentType: DocumentType, text: string, filename: string): ExtractedValues;
+  classifyDocument(filename: string, text: string): ClassifiedDocument | Promise<ClassifiedDocument>;
+  extractFields(documentType: DocumentType, text: string, filename: string): ExtractedValues | Promise<ExtractedValues>;
 }
+
+export const DOCUMENT_AI_PROVIDER = Symbol('DOCUMENT_AI_PROVIDER');

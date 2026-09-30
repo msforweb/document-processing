@@ -568,7 +568,7 @@ function App(): JSX.Element {
     }
   }
 
-  async function handleExportQueue(): Promise<void> {
+  async function handleExportQueue(format: 'csv' | 'json' = 'csv'): Promise<void> {
     if (!token) {
       return;
     }
@@ -582,7 +582,8 @@ function App(): JSX.Element {
       if (queueSearch.trim()) params.set('search', queueSearch.trim());
       if (onlyHighRisk) params.set('onlyHighRisk', 'true');
 
-      const response = await fetch(`http://localhost:3001/api/documents/export?${params.toString()}`, {
+      const exportPath = format === 'json' ? 'export.json' : 'export';
+      const response = await fetch(`http://localhost:3001/api/documents/${exportPath}?${params.toString()}`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -593,15 +594,15 @@ function App(): JSX.Element {
         throw new Error(data.message || 'Unable to export the review queue.');
       }
 
-      const csvText = await response.text();
-      const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+      const exportText = await response.text();
+      const blob = new Blob([exportText], { type: format === 'json' ? 'application/json;charset=utf-8;' : 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = 'review-queue.csv';
+      link.download = format === 'json' ? 'review-queue.json' : 'review-queue.csv';
       link.click();
       URL.revokeObjectURL(url);
-      setStatus('Review queue exported successfully.');
+      setStatus(`Review queue exported as ${format.toUpperCase()}.`);
     } catch (error) {
       const messageText = error instanceof Error ? error.message : 'Export failed.';
       setStatus(messageText);
@@ -1135,9 +1136,14 @@ function App(): JSX.Element {
                 </>
               ) : null}
             </div>
-            <button type="button" className="secondary-button compact-button" onClick={() => void handleExportQueue()}>
-              Export CSV
-            </button>
+            <div className="review-actions">
+              <button type="button" className="secondary-button compact-button" onClick={() => void handleExportQueue('csv')}>
+                Export CSV
+              </button>
+              <button type="button" className="secondary-button compact-button" onClick={() => void handleExportQueue('json')}>
+                Export JSON
+              </button>
+            </div>
           </div>
 
           {reviewQueue.length ? (

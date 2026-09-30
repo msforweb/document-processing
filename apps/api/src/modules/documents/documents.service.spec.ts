@@ -36,6 +36,7 @@ describe('DocumentsService', () => {
   const service = new DocumentsService(prismaMock, storageMock);
 
   beforeEach(() => {
+    jest.restoreAllMocks();
     jest.clearAllMocks();
   });
 
@@ -482,6 +483,22 @@ describe('DocumentsService', () => {
     expect(result).toContain('acme-invoice-1042.pdf');
     expect(result).toContain('Acme Supplies');
     expect(result).toContain('INV-1042');
+  });
+
+  it('exports review queue data as storage-safe JSON', async () => {
+    jest.spyOn(service, 'getReviewQueue').mockResolvedValue([{
+      id: 'export-json-1', filename: 'invoice.pdf', documentType: 'INVOICE', status: 'REVIEW_REQUIRED',
+      vendorName: 'Northwind', invoiceNumber: 'INV-2048', totalAmount: 1200, currency: 'USD',
+      createdAt: new Date('2026-09-01T00:00:00.000Z'), riskScore: 40,
+      storagePath: '/private/tenant/invoice.pdf', organizationId: 'org-1',
+    }] as any);
+
+    const result = await service.exportReviewQueueJson({ id: 'admin-1', organizationId: 'org-1', email: 'admin@example.com', role: 'ADMIN' });
+
+    expect(result.count).toBe(1);
+    expect(result.documents[0]).toEqual(expect.objectContaining({ id: 'export-json-1', createdAt: '2026-09-01T00:00:00.000Z' }));
+    expect(result.documents[0]).not.toHaveProperty('storagePath');
+    expect(result.documents[0]).not.toHaveProperty('organizationId');
   });
 
   it('filters the review queue to high-risk invoice work', async () => {

@@ -17,14 +17,14 @@ export class DocumentExtractionPipeline {
     return this.provider.name;
   }
 
-  run(filename: string, text: string, declaredType: DocumentType): DocumentPipelineResult {
-    const inferredClassification = this.provider.classifyDocument(filename, text);
+  async run(filename: string, text: string, declaredType: DocumentType): Promise<DocumentPipelineResult> {
+    const inferredClassification = await this.provider.classifyDocument(filename, text);
     const classified = declaredType === 'UNKNOWN'
       ? inferredClassification
       : { documentType: declaredType, confidence: 1 };
     const documentType = classified.documentType;
     const schema = DOCUMENT_SCHEMAS[documentType];
-    const extracted = this.provider.extractFields(documentType, text, filename);
+    const extracted = await this.provider.extractFields(documentType, text, filename);
     const fields: Record<string, NormalizedField> = {};
     for (const name of schema.fields) {
       const value = extracted[name] ?? { value: null, confidence: 0, source: 'not_found' };
@@ -48,7 +48,7 @@ export class DocumentExtractionPipeline {
     if (fieldName === 'currency') return cleaned.toUpperCase();
     if (dates.includes(fieldName)) {
       const parsed = new Date(cleaned);
-      return Number.isNaN(parsed.getTime()) ? cleaned : parsed.toISOString().slice(0, 10);
+      return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
     }
     return cleaned;
   }

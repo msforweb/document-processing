@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Job, Worker } from 'bullmq';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DocumentsService } from './documents.service';
@@ -10,8 +10,8 @@ export class DocumentsProcessor implements OnModuleInit, OnModuleDestroy {
   private worker?: Worker<DocumentProcessingTask>;
 
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly documentsService: DocumentsService,
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(DocumentsService) private readonly documentsService: DocumentsService,
   ) {}
 
   onModuleInit(): void {

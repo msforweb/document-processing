@@ -8,7 +8,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import type { AuthUser } from '../../types/auth-user';
 import { LocalStorageService } from '../../storage/local-storage.service';
 import { ProcessingQueueService } from './processing-queue.service';
-import { DocumentAiProvider } from './processing/document-ai-provider';
+import { DOCUMENT_AI_PROVIDER, type DocumentAiProvider } from './processing/document-ai-provider';
 import { DocumentExtractionPipeline } from './processing/document-extraction.pipeline';
 import { LocalDocumentAiProvider } from './processing/local-document-ai.provider';
 import { NotificationDeliveryService } from './notification-delivery.service';
@@ -40,7 +40,7 @@ export class DocumentsService {
     private readonly storageService: LocalStorageService,
     @Optional() @Inject(ProcessingQueueService)
     private readonly processingQueue?: ProcessingQueueService,
-    @Optional() @Inject(LocalDocumentAiProvider)
+    @Optional() @Inject(DOCUMENT_AI_PROVIDER)
     documentAiProvider?: DocumentAiProvider,
     @Optional() @Inject(NotificationDeliveryService)
     private readonly notificationDelivery?: NotificationDeliveryService,
@@ -102,6 +102,28 @@ export class DocumentsService {
     });
 
     return documents.map((document) => this.withReviewMetadata(document));
+  }
+
+  async exportReviewQueueJson(user: AuthUser, filters: { status?: string; documentType?: string; onlyHighRisk?: boolean; search?: string } = {}) {
+    const documents = await this.getReviewQueue(user, filters);
+    return {
+      exportedAt: new Date().toISOString(),
+      count: documents.length,
+      documents: documents.map((document) => ({
+        id: document.id,
+        filename: document.filename,
+        documentType: document.documentType,
+        status: document.status,
+        vendorName: document.vendorName ?? null,
+        invoiceNumber: document.invoiceNumber ?? null,
+        totalAmount: document.totalAmount ?? null,
+        currency: document.currency ?? null,
+        createdAt: new Date(document.createdAt).toISOString(),
+        riskScore: (document as typeof document & { riskScore?: number }).riskScore ?? this.getDocumentRiskScore(document),
+        recommendedReviewLane: (document as typeof document & { recommendedReviewLane?: string }).recommendedReviewLane ?? this.getRecommendedReviewLane(document, this.getDocumentRiskScore(document)),
+        recommendedReviewer: (document as typeof document & { recommendedReviewer?: string }).recommendedReviewer ?? this.getRecommendedReviewer(document, this.getDocumentRiskScore(document)),
+      })),
+    };
   }
 
   async exportReviewQueue(
@@ -1166,7 +1188,7 @@ export class DocumentsService {
     if (processingJobId) await this.updateProcessingProgress(processingJobId, 'TEXT_EXTRACTION', 20);
     const documentTextHint = await this.readDocumentTextHint(document.storagePath);
     if (processingJobId) await this.updateProcessingProgress(processingJobId, 'CLASSIFICATION_AND_EXTRACTION', 55);
-    const pipelineResult = this.extractionPipeline.run(document.filename, documentTextHint, document.documentType);
+    const pipelineResult = await this.extractionPipeline.run(document.filename, documentTextHint, document.documentType);
     const documentType = pipelineResult.documentType;
     const extractedFields = pipelineResult.fields;
     const extraction = documentType === 'INVOICE' ? this.toInvoiceExtraction(extractedFields, pipelineResult.missingRequiredFields.length > 0) : null;

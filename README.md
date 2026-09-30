@@ -57,9 +57,9 @@ npm run test
 - `packages/config`: shared environment configuration
 - `prisma`: schema and seed data
 
-## Next phase
+## Current implementation
 
-Phase 2 will add organizations, roles, document records, secure local storage, and multipart upload APIs.
+The project includes organization-scoped intake, asynchronous document processing, human review, audit history, operational reporting, and CSV/JSON exports. Optional external AI extraction and email delivery can be enabled through environment settings; local document extraction remains available by default.
 
 ## OCR and operational review enhancements
 
@@ -78,4 +78,4 @@ Invoice fraud assessments are stored per document and include weighted, explaina
 
 Document processing runs through BullMQ on Redis. `POST /api/documents/:id/process` returns an accepted job record; poll `GET /api/documents/:id/status` for persisted stage/progress and completion. Set `DOCUMENT_PROCESSING_CONCURRENCY` to tune worker concurrency. The API requires Redis to be available at startup.
 
-Classification and extraction are organized behind a `DocumentAiProvider` interface. The current `local-regex-v1` provider handles invoice, bank statement, KYC, and compliance report fields without an external AI key. Normalized field values, confidence, source, and classification are stored per document; required fields below `FIELD_REVIEW_CONFIDENCE` route to manual review.
+Classification and extraction use a replaceable `DocumentAiProvider` interface. The local `local-regex-v1` provider handles invoice, bank statement, KYC, and compliance report fields without an external AI key. To opt into an OpenAI-compatible chat-completions service (including OpenRouter), set `AI_BASE_URL`, `AI_API_KEY`, and `AI_MODEL`; when all three are present the API uses that provider and sends extracted document text to the configured endpoint. Confirm that endpoint is approved for your organization’s data. Responses are constrained to configured document fields, confidence values are range-checked, and required fields below `FIELD_REVIEW_CONFIDENCE` route to manual review. External provider failures fail the processing job instead of silently substituting local results. The review queue can be downloaded as either CSV or JSON from the operations console; the JSON API export omits internal storage paths and tenant identifiers.
