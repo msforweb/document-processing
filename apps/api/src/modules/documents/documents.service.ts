@@ -1694,7 +1694,7 @@ export class DocumentsService {
     const outputPath = path.join(temporaryDirectory, `${variant}-${pageIndex}.png`);
     const processors = [process.env.OCR_IMAGE_PROCESSOR_PATH?.trim(), 'magick', 'convert'].filter(Boolean) as string[];
     const adjustments = variant === 'adaptive'
-      ? ['-colorspace', 'Gray', '-deskew', '40%', '-brightness-contrast', '5x25', '-adaptive-threshold', '31x31+12%', '-despeckle']
+      ? ['-colorspace', 'Gray', '-deskew', '40%', '-brightness-contrast', '5x25', '-lat', '31x31', '-despeckle']
       : ['-colorspace', 'Gray', '-deskew', '40%', '-normalize', '-contrast-stretch', '1%x1%', '-sharpen', '0x1'];
 
     for (const binary of processors) {
