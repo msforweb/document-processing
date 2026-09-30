@@ -288,7 +288,7 @@ describe('DocumentsService', () => {
         },
       },
       orderBy: { createdAt: 'desc' },
-      include: { assignedReviewer: { select: { id: true, name: true, email: true } } },
+      include: { assignedReviewer: { select: { id: true, name: true, email: true } }, fraudAssessment: true },
     });
     expect(result).toHaveLength(1);
   });
@@ -377,7 +377,7 @@ describe('DocumentsService', () => {
         ],
       },
       orderBy: { createdAt: 'desc' },
-      include: { assignedReviewer: { select: { id: true, name: true, email: true } } },
+      include: { assignedReviewer: { select: { id: true, name: true, email: true } }, fraudAssessment: true },
     });
     expect(result).toHaveLength(1);
     expect(result[0]?.id).toBe('doc-search-1');
@@ -884,6 +884,7 @@ describe('DocumentsService', () => {
         assignedReviewer: { select: { id: true, name: true, email: true } },
         classification: true,
         extractedFields: { orderBy: { fieldName: 'asc' } },
+        fraudAssessment: true,
       },
     });
     expect(result.summary).toContain('Invoice');
@@ -974,6 +975,14 @@ trailer
     } finally {
       await fs.unlink(filePath).catch(() => undefined);
     }
+  });
+
+  it('ranks structured invoice OCR above longer noisy output', () => {
+    const scoreOcrText = (service as any).scoreOcrText.bind(service);
+    const structuredInvoice = 'ACME SUPPLIES INVOICE INV-2048 Date 2026-09-18 Total USD 1,240.50';
+    const noisyOutput = '######## lllllll 00000 ///// @@@@ xxxxx zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz';
+
+    expect(scoreOcrText(structuredInvoice)).toBeGreaterThan(scoreOcrText(noisyOutput));
   });
 
   it('preprocesses images and compares multiple Tesseract page segmentation modes', async () => {
