@@ -413,6 +413,20 @@ export class DocumentsService {
     if (invoiceKey && vendorDocuments.some((item) => item.id !== document.id && this.normalizeInvoiceComparisonKey(item.invoiceNumber ?? '') === invoiceKey)) {
       addSignal('DUPLICATE_INVOICE_NUMBER', 'high', 45, 'Invoice number matches another submission from this vendor.');
     }
+    const amountInCents = Math.round(amount * 100);
+    const crossVendorDuplicate = invoiceKey && amountInCents > 0 && documents.some((item) => {
+      const otherVendorKey = this.normalizeVendorKey(item.vendorName);
+      return item.id !== document.id
+        && Boolean(vendorKey)
+        && Boolean(otherVendorKey)
+        && otherVendorKey !== vendorKey
+        && this.normalizeInvoiceComparisonKey(item.invoiceNumber ?? '') === invoiceKey
+        && (item.currency ?? 'USD').toUpperCase() === currency
+        && Math.round(Number(item.totalAmount ?? 0) * 100) === amountInCents;
+    });
+    if (crossVendorDuplicate) {
+      addSignal('CROSS_VENDOR_DUPLICATE_INVOICE', 'medium', 30, 'The normalized invoice number and amount match a submission from another vendor.');
+    }
 
     const historicalAmounts = priorVendorDocuments.map((item) => Number(item.totalAmount ?? 0)).filter((item) => Number.isFinite(item) && item > 0).sort((left, right) => left - right);
     if (amount > 0 && historicalAmounts.length >= 3) {

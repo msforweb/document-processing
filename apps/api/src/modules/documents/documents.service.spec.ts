@@ -19,6 +19,7 @@ describe('DocumentsService', () => {
     reviewAssignment: { findMany: jest.fn(), create: jest.fn(), updateMany: jest.fn() },
     notification: { findUnique: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     vendorRiskProfile: { upsert: jest.fn(), findMany: jest.fn() },
+    fraudAssessment: { upsert: jest.fn() },
     processingJob: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
     documentClassification: { upsert: jest.fn() },
     extractedField: { upsert: jest.fn(), findMany: jest.fn() },
@@ -80,6 +81,23 @@ describe('DocumentsService', () => {
 
     expect(prismaMock.vendorRiskProfile.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({ vendorName: 'Northwind', currency: 'USD', signals: expect.arrayContaining([expect.stringContaining('near-threshold')]) }),
+    }));
+  });
+
+  it('records a fraud signal when invoice number and amount match across vendors', async () => {
+    prismaMock.document.findMany.mockResolvedValue([
+      { id: 'cross-vendor-1', organizationId: 'org-1', documentType: 'INVOICE', vendorName: 'Northwind', invoiceNumber: 'INV-100', totalAmount: 1250.5, currency: 'USD', createdAt: new Date('2026-09-01T00:00:00.000Z') },
+      { id: 'cross-vendor-2', organizationId: 'org-1', documentType: 'INVOICE', vendorName: 'Contoso', invoiceNumber: ' inv 100 ', totalAmount: 1250.5, currency: 'USD', createdAt: new Date('2026-09-02T00:00:00.000Z') },
+    ]);
+    prismaMock.fraudAssessment.upsert.mockImplementation(async (args: any) => args);
+
+    const result = await service.recalculateFraudAssessments({ id: 'admin-1', organizationId: 'org-1', email: 'admin@example.com', role: 'ADMIN' });
+
+    expect(result.assessed).toBe(2);
+    expect(prismaMock.fraudAssessment.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        signals: expect.arrayContaining([expect.objectContaining({ code: 'CROSS_VENDOR_DUPLICATE_INVOICE', severity: 'medium', weight: 30 })]),
+      }),
     }));
   });
 
